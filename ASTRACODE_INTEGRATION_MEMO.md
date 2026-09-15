@@ -349,11 +349,13 @@ builtin — nên `package.json` của repo không phải đụng tới).
 | `lib/globs.mjs` | Khớp `exclude_globs` (`**`, `*`, `?`) — tự viết để khỏi thêm dependency |
 | `lib/redact.mjs` | Che bí mật bằng cả literal lẫn pattern, trước khi bất cứ chuỗi nào ra log/response |
 | `lib/observe.mjs` | Banner khởi động, sổ log theo `run_id`, ghi `logs/` + `results/` xuống đĩa. Mọi chuỗi đi qua đây đều đã che secret |
+| `lib/retry.mjs` | Thử lại ĐÚNG 429 và 503, bốn lần chờ 2/4/8/16 s. Mọi mã khác ném ngay lượt đầu |
+| `lib/limit.mjs` | Trần lượt judge chạy cùng lúc trên cả server (hạn mức tính theo API key, mà key thì dùng chung) |
 | `.gitignore` | `logs/` và `results/` là vết lúc chạy, mang nội dung repo của người khác — không commit |
 | `fixtures/tickets-heading.md` | Mẫu ticket dạng heading (key `WEB-1001`, `1024`, `EXP_7`) |
 | `fixtures/tickets-table.md` | Mẫu ticket dạng bảng tiếng Việt (key `#77`, `ABC_42`, `ops.deploy.v2`) |
 | `test/fakeCli.mjs` | Đóng thế CLI của AstraCode để test/nghiệm thu chạy offline |
-| `test/*.test.mjs` | 56 test (`node --test test/*.test.mjs`), không cần mạng/gateway/token |
+| `test/*.test.mjs` | 76 test (`node --test test/*.test.mjs`), không cần mạng/gateway/token |
 | `README.md` | Bản đầy đủ của mọi thứ dưới đây |
 
 ## 2. Ba backend
@@ -568,8 +570,9 @@ Cập nhật 2026-09-16 trên máy mới (`E:\astracode`, Node v24.14.1, pnpm 11
   → `401`. Đừng dùng nó để kiểm key; phép thử đúng là `POST /v1/chat/completions` với một
   model có thật.
 
-- **Test: 56/56 xanh**, chạy offline (`cd tools/astraqa-server && node --test test/*.test.mjs`),
-  ~4 s. 47 ca cũ + 9 ca mới của lớp quan sát.
+- **Test: 76/76 xanh**, chạy offline (`cd tools/astraqa-server && node --test test/*.test.mjs`),
+  ~10 s. 47 ca gốc + 9 ca lớp quan sát + 12 ca backoff/limiter/cách ly lỗi + 8 ca
+  `ASTRACODE_MAX_TICKETS` và `/healthz`. **Không ca nào gọi model thật.**
 
 - Đã commit vào nhánh `feat/astraqa-server` (**chưa push**).
 
@@ -628,6 +631,51 @@ Google tự đề nghị (~50 s). Với 429 loại "hết quota ngày" thì khô
 này gặp 429 loại "quá nhiều request/phút" thật, cân nhắc đọc `RetryInfo.retryDelay` trong
 body thay vì dùng bảng cố định — nhưng đó là đổi hợp đồng, phải hỏi trước.
 
+### `ASTRACODE_MAX_TICKETS` — giữ đạn cho buổi demo
+
+Vì hạn mức là 20 lượt/ngày/model, một job 184 ticket sẽ đốt sạch hạn mức ngay lượt đầu và
+hôm đó không còn gì để chạy nữa. Biến này đặt trần số ticket được chấm trong **một** job:
+
+```bash
+ASTRACODE_MAX_TICKETS=3 PORT=8000 node tools/astraqa-server/server.mjs
+```
+
+- `0` (mặc định) = không giới hạn, y như trước.
+- `>0` = chỉ chấm **N ticket đầu** theo đúng thứ tự trong `tickets_md`. Phần còn lại **vẫn có
+  mặt đầy đủ trong `items[]`** với `code_status: "missing"`, `confidence: 0`, `evidence: []`,
+  `reason: "skipped_quota_limit"`. Bỏ hẳn chúng khỏi báo cáo sẽ khiến AstraQA tưởng
+  `tickets_md` chỉ có bấy nhiêu ticket.
+- `stats` khai đủ ba số: `tickets_total`, `tickets_skipped`, `max_tickets`.
+- `report_md` viết thẳng rằng `missing` kiểu này nghĩa là **"chưa xét"**, khác hẳn
+  `judge_failed` ("đã thử, hỏng") và khác hẳn `missing` thật ("đã kiểm tra và thấy thiếu").
+- Trần nằm ở **cấp server**, không phải trong request — AstraQA không tự nới được.
+
+Schema `items[]` không đổi: ticket bị bỏ qua vẫn là một item hợp lệ đúng ba trạng thái cũ.
+
+### `/healthz` khai gì
+
+```json
+{
+  "status": "ok",
+  "backend": "fci",
+  "model": "gemini-3.5-flash",
+  "max_tickets": 3,
+  "judge_concurrency": 2,
+  "model_calls_this_session": 7,
+  "jobs_this_session": 2,
+  "fci_configured": true
+}
+```
+
+`model_calls_this_session` **đếm nội bộ từ lúc server khởi động** — không hỏi Google, nên nó
+**không** phải hạn mức còn lại. Nó đếm **mỗi request HTTP**, kể cả lần thử lại: một ticket
+dính 503 hai lần rồi thành công là **3** lượt gọi dù `stats.judge_calls` chỉ ghi 1. Muốn biết
+hôm nay đã tiêu bao nhiêu trên tổng 20 thì phải cộng qua mọi lần khởi động server — khởi động
+lại là bộ đếm về 0, còn hạn mức của Google thì không.
+
+Backend `none` không bao giờ làm tăng bộ đếm này. `/healthz` **không** khai key, và không có
+field nào tên chứa `key`/`token`/`secret` — có test canh.
+
 **Số song song an toàn: 2** (mặc định, đổi bằng `ASTRACODE_JUDGE_CONCURRENCY`). Không đo
 được ích lợi của việc hạ xuống 1 vì trần là *mỗi ngày* chứ không phải *mỗi phút* — hạ song
 song không làm tăng số ticket chấm được trong ngày, chỉ làm job chạy lâu hơn.
@@ -655,7 +703,7 @@ payload dựng bằng Node. Mỗi bộ ticket có một ticket tiếng Việt c�
 Vết trên đĩa: `tools/astraqa-server/logs/RUN-GEMINI-A.log` và `.../results/RUN-GEMINI-A.json`
 (tương tự cho `RUN-GEMINI-B`).
 
-### Ba hành vi mới thêm cùng lúc
+### Bốn hành vi mới thêm cùng lúc
 
 1. **Thử lại có backoff** — `lib/retry.mjs`, chỉ cho **429 và 503**, 4 lần chờ 2/4/8/16 s.
    Mọi mã khác (400/401/403/404/422/500) ném ngay lượt đầu, không chờ.
@@ -668,8 +716,20 @@ Vết trên đĩa: `tools/astraqa-server/logs/RUN-GEMINI-A.log` và `.../results
 3. **Trần song song cả server** — `lib/limit.mjs`, mặc định 2. Đặt ở cấp server chứ không cấp
    job vì hạn mức tính theo API key mà key thì cả server dùng chung.
 
-`stats` có thêm bốn trường: `judge_failed`, `hits_429`, `hits_503` (và `model` đã có sẵn).
-Schema `items[]` **không đổi** — ticket hỏng vẫn là một item hợp lệ đúng ba trạng thái cũ.
+4. **Trần ticket mỗi job** — `ASTRACODE_MAX_TICKETS`, mặc định 0 (không giới hạn). Xem mục
+   trên. Cùng với bộ đếm lượt gọi trên `/healthz`, đây là hai thứ giữ cho hạn mức 20 lượt/ngày
+   không bị một job lớn đốt sạch.
+
+`stats` có thêm sáu trường: `judge_failed`, `hits_429`, `hits_503`, `tickets_total`,
+`tickets_skipped`, `max_tickets` (và `model` đã có sẵn).
+Schema `items[]` **không đổi** — ticket hỏng và ticket bị bỏ qua đều là item hợp lệ đúng ba
+trạng thái cũ, phân biệt nhau bằng `reason`:
+
+| `reason` | Nghĩa |
+|---|---|
+| `judge_failed: …` | đã thử chấm, lượt gọi hỏng — **chưa biết** |
+| `skipped_quota_limit` | chưa thử lần nào vì vượt `ASTRACODE_MAX_TICKETS` — **chưa xét** |
+| `no_match` / `matched_by_key` / `matched_by_summary` / … | đã chấm thật, kết luận đáng tin |
 ## 7. Lệnh chạy
 
 **Khởi động** (đang chạy bằng đúng lệnh này):
@@ -686,9 +746,21 @@ Backend lấy theo `.env` (`ASTRACODE_JUDGE=fci`). Hai biến đặt ngoài là 
   ngay trong repo. Thư mục này bị xoá sau mỗi job nên chẳng việc gì phải nằm trong cây nguồn.
 - `PORT=8000` — trùng `.env`, ghi ra cho rõ.
 
-Muốn ép backend khác thì thêm `ASTRACODE_JUDGE=none` (hoặc `cli`) vào đầu lệnh; muốn đổi trần
-song song thì `ASTRACODE_JUDGE_CONCURRENCY=<n>`. **Nhớ: biến export thắng `.env`, nên đặt
-`ASTRACODE_JUDGE=none` một lần rồi quên là sửa `.env` mãi cũng không có tác dụng.**
+Muốn ép backend khác thì thêm `ASTRACODE_JUDGE=none` (hoặc `cli`) vào đầu lệnh; đổi trần song
+song thì `ASTRACODE_JUDGE_CONCURRENCY=<n>`; giới hạn số ticket mỗi job thì
+`ASTRACODE_MAX_TICKETS=<n>`. **Nhớ: biến export thắng `.env`, nên đặt `ASTRACODE_JUDGE=none`
+một lần rồi quên là sửa `.env` mãi cũng không có tác dụng.**
+
+**Lệnh cho buổi demo** — chỉ tiêu 3 lượt gọi mỗi job thay vì cả trăm:
+
+```bash
+cd /e/astracode
+ASTRACODE_MAX_TICKETS=3 PORT=8000 WORKSPACE_DIR="$TEMP/astracode-astraqa" \
+  node tools/astraqa-server/server.mjs
+```
+
+Kiểm còn bao nhiêu đạn đã tiêu trong phiên: `curl -sS http://127.0.0.1:8000/healthz` rồi đọc
+`model_calls_this_session` (xem mục 6b về giới hạn của con số này).
 
 Server nghe ở `127.0.0.1:8000`. AstraQA (ở `localhost:7000`) gọi vào đây; endpoint và schema
 **không đổi** so với mục 3.

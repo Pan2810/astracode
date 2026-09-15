@@ -45,6 +45,9 @@ export function readConfig(env = process.env) {
     // Trần lượt judge chạy cùng lúc trên cả server. Hạn mức request/phút tính
     // theo API key, mà key thì cả server dùng chung — nên trần phải ở đây.
     judgeConcurrency: Math.max(1, Number(env.ASTRACODE_JUDGE_CONCURRENCY || 2) || 2),
+    // Trần số ticket được chấm trong MỘT job. 0 = không giới hạn.
+    // Dùng khi hạn mức của nhà cung cấp tính theo ngày và mỗi lượt gọi là quý.
+    maxTickets: Math.max(0, Number(env.ASTRACODE_MAX_TICKETS || 0) || 0),
 
     // Judge: `fci` gọi thẳng endpoint OpenAI-compatible (mặc định), `cli` spawn
     // CLI của AstraCode. Hai đường trả về cùng một schema items[].
@@ -116,6 +119,10 @@ export function createServer(config, { log = console.log, persist = true } = {})
   const baseRedact = makeRedactor([config.serviceToken, config.astraworkJwt, config.fciApiKey]);
   // Một limiter cho cả server, chia chung giữa mọi job đang chạy.
   const limiter = createLimiter(config.judgeConcurrency ?? 2);
+  // Bộ đếm của PHIÊN này: bao nhiêu lượt gọi model đã tiêu từ lúc server khởi
+  // động. Đếm nội bộ — không hỏi nhà cung cấp, nên nó KHÔNG phải hạn mức còn
+  // lại, chỉ là "phiên này đã bắn bao nhiêu viên".
+  const usage = { model_calls: 0, jobs: 0 };
   const slog = (msg) => log(baseRedact(String(msg ?? '')));
 
   function start(job, body, runLog) {
@@ -128,7 +135,8 @@ export function createServer(config, { log = console.log, persist = true } = {})
     ]);
 
     job.status = 'running';
-    runAnalyzeJob({ job, body, config, redact, log: (m) => runLog.line(m), limiter })
+    usage.jobs += 1;
+    runAnalyzeJob({ job, body, config, redact, log: (m) => runLog.line(m), limiter, usage })
       .then((result) => {
         job.status = 'succeeded';
         job.result = result;
@@ -166,11 +174,18 @@ export function createServer(config, { log = console.log, persist = true } = {})
       return sendJson(res, 200, {
         status: 'ok',
         backend: config.judgeBackend,
+        model: config.judgeBackend === 'fci' ? config.fciModel || null : null,
+        max_tickets: config.maxTickets ?? 0,
+        judge_concurrency: config.judgeConcurrency ?? 2,
+        // Ðếm nội bộ từ lúc khởi động — KHÔNG hỏi nhà cung cấp, nên đây không
+        // phải hạn mức còn lại. Lượt thử lại cũng tính, vì nó cũng là request thật.
+        model_calls_this_session: usage.model_calls,
+        jobs_this_session: usage.jobs,
         ...(config.judgeBackend === 'fci'
-          ? { model: config.fciModel || null, fci_configured: Boolean(config.fciBaseUrl && config.fciApiKey && config.fciModel) }
+          ? { fci_configured: Boolean(config.fciBaseUrl && config.fciApiKey && config.fciModel) }
           : config.judgeBackend === 'cli'
             ? { cli_path: config.cliPath }
-            : { model: null, note: 'quét tất định, không gọi model' }),
+            : { note: 'quét tất định, không gọi model' }),
       });
     }
 

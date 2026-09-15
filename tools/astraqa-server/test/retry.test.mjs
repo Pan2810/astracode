@@ -289,6 +289,22 @@ test('hỏng HẾT thì job failed, KHÔNG trả bảng toàn missing', async ()
   assert.equal(done.result, undefined);
 });
 
+test('/healthz đếm MỖI request HTTP tới model, kể cả lần thử lại', async () => {
+  const repoUrl = await makeRepo('repo-dem-luot', { 'a.txt': 'mot\n' });
+  const truoc = (await (await fetch(`${base}/healthz`)).json()).model_calls_this_session;
+
+  // Một ticket: 503 hai lần rồi 200 → 3 request thật, dù chỉ một lượt judge.
+  plan = [503, 503, ok('T-1')];
+  hits = 0;
+  const done = await poll((await (await post({ run_id: 'RUN-DEM', repo_url: repoUrl, tickets_md: '## T-1 — mot' })).json()).job_id);
+  assert.equal(done.status, 'succeeded', done.error);
+
+  const sau = (await (await fetch(`${base}/healthz`)).json()).model_calls_this_session;
+  assert.equal(sau - truoc, 3, 'phải đếm cả hai lần thử lại — mỗi lần là một viên đạn của hạn mức');
+  assert.equal(done.result.stats.judge_calls, 1, 'nhưng judge_calls vẫn đếm theo ticket');
+  assert.equal(done.result.stats.hits_503, 2);
+});
+
 test('JSON xấu của model là lỗi của ticket đó, không nới parser', async () => {
   const repoUrl = await makeRepo('repo-json-xau', { 'a.txt': 'mot\n' });
   // Lượt 1: không có khối json. Lượt 2: khối json nhưng sai schema. Lượt 3: đúng.

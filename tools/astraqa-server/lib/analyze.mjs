@@ -90,7 +90,7 @@ function runCli({ cliPath, cwd, prompt, astraworkToken, timeoutMs, signal }) {
  * Một lượt judge cho một ticket. Trả về văn bản thô của model — phần bóc JSON
  * nằm ngoài, dùng chung cho cả hai backend.
  */
-async function judgeOnce({ backend, ticket, options, repoDir, config, timeoutMs, redact, job, log, stats, limiter }) {
+async function judgeOnce({ backend, ticket, options, repoDir, config, timeoutMs, redact, job, log, stats, limiter, usage }) {
   if (backend === 'none') {
     // Không có model nên không có gì để bóc: trả thẳng object đã dựng, nhưng nó
     // vẫn đi qua `pickItem` như hai backend kia để không có đường nào lách được
@@ -100,6 +100,7 @@ async function judgeOnce({ backend, ticket, options, repoDir, config, timeoutMs,
 
   if (backend === 'cli') {
     const prompt = buildPrompt({ ticket, options, promptOverride: options.prompt_override });
+    usage.model_calls += 1;
     const res = await runCli({
       cliPath: config.cliPath,
       cwd: repoDir,
@@ -122,13 +123,19 @@ async function judgeOnce({ backend, ticket, options, repoDir, config, timeoutMs,
     context: renderContext(ctx),
     promptOverride: options.prompt_override,
   });
-  const { text, usage } = await limiter.run(() =>
+  // Ðổi tên khi bóc: `usage` trả về từ askFci là số token, còn tham số `usage`
+  // của hàm này là bộ đếm lượt gọi. Trùng tên sẽ che mất bộ đếm trong cả thân hàm.
+  const { text, usage: tokenUsage } = await limiter.run(() =>
     askFci({
       config,
       prompt,
       timeoutMs,
       redact,
       signal: job.abort?.signal,
+      // Mỗi request HTTP là một lượt gọi model, kể cả lần thử lại.
+      onAttempt: () => {
+        usage.model_calls += 1;
+      },
       onRetry: ({ status, attempt, of, waitMs, message }) => {
         // Hạn mức của nhà cung cấp là chuyện hạ tầng, không phải lỗi code — nên
         // nó phải hiện trong log chứ không im lặng trôi qua.
@@ -137,7 +144,7 @@ async function judgeOnce({ backend, ticket, options, repoDir, config, timeoutMs,
       },
     }),
   );
-  return { text, note: `FCI ${config.fciModel}`, usage, stderr: '' };
+  return { text, note: `FCI ${config.fciModel}`, usage: tokenUsage, stderr: '' };
 }
 
 /** `src/a.ts:120-148` → {path, lines}. Model hay gộp như vậy dù schema tách hai field. */
@@ -269,6 +276,12 @@ function buildReportMd({ runId, generatedAt, backend, repoUrl, ref, head, items,
   out.push(`- tickets: ${items.length} — done ${count('done')}, partial ${count('partial')}, missing ${count('missing')}`);
   out.push(`- bằng chứng: giữ ${stats.evidence_kept}, loại ${stats.evidence_dropped}, kẹp ${stats.evidence_clamped}`);
   out.push(`- lượt judge: ${stats.judge_parsed}/${stats.judge_calls} parse được${stats.judge_failed ? `, **${stats.judge_failed} lượt hỏng**` : ''}`);
+  if (stats.tickets_skipped) {
+    out.push(
+      `- **bỏ qua ${stats.tickets_skipped}/${stats.tickets_total} ticket** vì \`ASTRACODE_MAX_TICKETS=${stats.max_tickets}\` ` +
+        '— chưa xét, không phải đã xét rồi thấy thiếu',
+    );
+  }
   if (stats.hits_429 || stats.hits_503) {
     out.push(`- hạn mức nhà cung cấp: ${stats.hits_429} lần 429, ${stats.hits_503} lần 503 (đã tự thử lại)`);
   }
@@ -294,6 +307,14 @@ function buildReportMd({ runId, generatedAt, backend, repoUrl, ref, head, items,
     const t = byKey.get(it.key);
     out.push(`## ${it.key}${t?.title ? ` — ${t.title}` : ''}`);
     out.push('');
+    if (it.reason === 'skipped_quota_limit') {
+      out.push(`- **BỎ QUA** — vượt \`ASTRACODE_MAX_TICKETS=${stats.max_tickets}\`, ticket này chưa được xét lần nào.`);
+      if (t?.status) out.push(`- trạng thái do nguồn ngoài báo: ${t.status}`);
+      out.push('');
+      out.push('- _`missing` ở đây nghĩa là "chưa xét", không phải "đã kiểm tra và thấy thiếu"._');
+      out.push('');
+      continue;
+    }
     const failed = failedByKey.get(it.key);
     if (failed) {
       out.push(`- **KHÔNG chấm được** — ${failed}`);
@@ -337,7 +358,7 @@ function buildReportMd({ runId, generatedAt, backend, repoUrl, ref, head, items,
  * Chạy job. Cập nhật `job.progress` / `job.current` tại chỗ để endpoint poll
  * đọc được ngay, trả về `result` đúng hợp đồng.
  */
-export async function runAnalyzeJob({ job, body, config, redact, log, limiter = createLimiter(1) }) {
+export async function runAnalyzeJob({ job, body, config, redact, log, limiter = createLimiter(1), usage = { model_calls: 0 } }) {
   const options = { ...DEFAULT_OPTIONS, ...(body.options ?? {}) };
   const timeoutMs = Math.max(1, Number(options.timeout_sec) || DEFAULT_OPTIONS.timeout_sec) * 1000;
   const maxFiles = Math.max(1, Number(options.max_files_per_ticket) || DEFAULT_OPTIONS.max_files_per_ticket);
@@ -349,6 +370,25 @@ export async function runAnalyzeJob({ job, body, config, redact, log, limiter = 
   // Tách ticket TRƯỚC khi clone: tickets_md hỏng thì không việc gì phải kéo cả
   // một repo về rồi mới báo lỗi.
   const tickets = parseTickets(body.tickets_md);
+
+  /**
+   * Trần số ticket được chấm trong MỘT job. `0` = không giới hạn.
+   *
+   * Lý do tồn tại: hạn mức của nhà cung cấp tính theo NGÀY (free tier của Google
+   * cho 20 lượt/ngày/model), mà một ticket là một lượt. Một buổi demo chỉ cần
+   * vài ticket đầu để cho thấy đường ống chạy — nếu để nguyên 184 ticket thì
+   * hết sạch hạn mức ngay lượt đầu và không còn gì cho hôm sau.
+   *
+   * Các ticket vượt trần KHÔNG bị bỏ khỏi báo cáo: chúng vẫn là item hợp lệ với
+   * `reason: "skipped_quota_limit"`, để AstraQA thấy rõ chúng chưa được xét chứ
+   * không phải đã xét rồi thấy thiếu.
+   */
+  const maxTickets = Math.max(0, Number(config.maxTickets ?? 0) || 0);
+  const toJudge = maxTickets > 0 ? tickets.slice(0, maxTickets) : tickets;
+  const skipped = maxTickets > 0 ? tickets.slice(maxTickets) : [];
+  if (skipped.length) {
+    log(`ASTRACODE_MAX_TICKETS=${maxTickets} — chỉ chấm ${toJudge.length}/${tickets.length} ticket, bỏ qua ${skipped.length} ticket còn lại.`);
+  }
 
   const repoDir = path.join(config.workspaceDir, job.id, 'repo');
   await fs.mkdir(repoDir, { recursive: true });
@@ -362,6 +402,9 @@ export async function runAnalyzeJob({ job, body, config, redact, log, limiter = 
     judge_calls: 0,
     judge_parsed: 0,
     judge_failed: 0,
+    tickets_total: tickets.length,
+    tickets_skipped: skipped.length,
+    max_tickets: maxTickets,
     hits_429: 0,
     hits_503: 0,
     evidence_kept: 0,
@@ -386,9 +429,12 @@ export async function runAnalyzeJob({ job, body, config, redact, log, limiter = 
     const clampedByKey = new Map();
     const failedByKey = new Map();
 
-    log(`clone xong: ${tickets.length} ticket, commit ${head || '(không rõ)'} — bắt đầu chấm bằng backend ${backend}`);
+    log(
+      `clone xong: ${tickets.length} ticket, commit ${head || '(không rõ)'} — ` +
+        `chấm ${toJudge.length} bằng backend ${backend}${skipped.length ? `, bỏ qua ${skipped.length} vì ASTRACODE_MAX_TICKETS` : ''}`,
+    );
 
-    for (const ticket of tickets) {
+    for (const ticket of toJudge) {
       job.current = ticket.key;
       const ticketStartedAt = Date.now();
 
@@ -403,7 +449,7 @@ export async function runAnalyzeJob({ job, body, config, redact, log, limiter = 
       let item;
       try {
         const res = await judgeOnce({
-          backend, ticket, options: effective, repoDir, config, timeoutMs, redact, job, log, stats, limiter,
+          backend, ticket, options: effective, repoDir, config, timeoutMs, redact, job, log, stats, limiter, usage,
         });
 
         let parsed;
@@ -423,7 +469,7 @@ export async function runAnalyzeJob({ job, body, config, redact, log, limiter = 
         stats.judge_failed += 1;
         failedByKey.set(ticket.key, why);
         log(
-          `[${items.length + 1}/${tickets.length}] ${ticket.key} | ${Date.now() - ticketStartedAt}ms | ` +
+          `[${items.length + 1}/${toJudge.length}] ${ticket.key} | ${Date.now() - ticketStartedAt}ms | ` +
             `LƯỢT HỎNG — ${why}`,
         );
         // `missing` + confidence 0 là cách trung thực nhất để nói "không chấm
@@ -452,7 +498,7 @@ export async function runAnalyzeJob({ job, body, config, redact, log, limiter = 
       // ban đêm cần thấy cả những lượt trôi chảy, nếu không thì im lặng là nhập
       // nhằng giữa "chạy tốt" và "chưa chạy tới".
       log(
-        `[${items.length + 1}/${tickets.length}] ${ticket.key} | ${Date.now() - ticketStartedAt}ms | ` +
+        `[${items.length + 1}/${toJudge.length}] ${ticket.key} | ${Date.now() - ticketStartedAt}ms | ` +
           `${item.code_status} (confidence ${item.confidence.toFixed(2)}, ${item.reason}) | ` +
           `bằng chứng giữ ${evidence.length}, loại ${dropped.length}, kẹp ${clamped.length}` +
           (dropped.length ? ` — loại: ${dropped.map((d) => `${d.path} (${d.why})`).join('; ')}` : '') +
@@ -463,11 +509,26 @@ export async function runAnalyzeJob({ job, body, config, redact, log, limiter = 
       job.progress = { done: items.length, total: tickets.length };
     }
 
+    // Ticket vượt trần vẫn có mặt trong báo cáo, chỉ nói rõ là chưa xét. Bỏ hẳn
+    // chúng khỏi `items` sẽ khiến AstraQA tưởng `tickets_md` chỉ có bấy nhiêu.
+    for (const ticket of skipped) {
+      items.push({
+        key: ticket.key,
+        code_status: 'missing',
+        confidence: 0,
+        evidence: [],
+        reason: 'skipped_quota_limit',
+      });
+      droppedByKey.set(ticket.key, []);
+      clampedByKey.set(ticket.key, []);
+      job.progress = { done: items.length, total: tickets.length };
+    }
+
     // Không lượt nào chấm được thì đừng trả về một bảng toàn `missing`: AstraQA
     // sẽ đọc nó thành "cả repo chưa làm gì". Hỏng hết là hỏng job, nói thẳng.
-    if (tickets.length > 0 && stats.judge_parsed === 0) {
+    if (toJudge.length > 0 && stats.judge_parsed === 0) {
       throw new Error(
-        `Không lượt judge nào thành công (${stats.judge_failed}/${tickets.length} ticket hỏng). ` +
+        `Không lượt judge nào thành công (${stats.judge_failed}/${toJudge.length} ticket hỏng). ` +
           `Lỗi đầu tiên: ${failedByKey.values().next().value ?? 'không rõ'}`,
       );
     }

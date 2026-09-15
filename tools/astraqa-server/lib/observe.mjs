@@ -121,6 +121,7 @@ export function bannerLines(config, { runsDir, devMode }) {
     `  model         : ${config.judgeBackend === 'fci' ? config.fciModel || '(chưa đặt)' : '(không dùng model qua server)'}`,
     `  WORKSPACE_DIR : ${config.workspaceDir}`,
     `  song song     : tối đa ${config.judgeConcurrency ?? 2} lượt judge cùng lúc (cả server)`,
+    `  MAX_TICKETS   : ${config.maxTickets ? `${config.maxTickets} ticket đầu mỗi job (phần còn lại → skipped_quota_limit)` : '0 (không giới hạn)'}`,
     `  logs          : ${path.join(runsDir, 'logs')}`,
     `  results       : ${path.join(runsDir, 'results')}`,
     `  SERVICE_TOKEN : ${yn(config.serviceToken)}`,

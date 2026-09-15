@@ -28,11 +28,14 @@ const SYSTEM =
  * @returns {Promise<{text: string, usage: object|undefined}>}
  * @throws Error đã che secret (người gọi truyền `redact` vào).
  */
-export async function askFci({ config, prompt, timeoutMs, redact, onRetry, sleep, signal }) {
+export async function askFci({ config, prompt, timeoutMs, redact, onRetry, onAttempt, sleep, signal }) {
   const url = `${String(config.fciBaseUrl).replace(/\/+$/, '')}/chat/completions`;
 
   return withRetry(
     async () => {
+      // Báo TRƯỚC khi gửi: mỗi lần thử lại cũng là một request thật tới nhà
+      // cung cấp, nên nó phải được đếm như một lượt gọi.
+      onAttempt?.();
       let res;
       try {
         res = await fetch(url, {
