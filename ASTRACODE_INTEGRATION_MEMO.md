@@ -538,9 +538,11 @@ vẫn để lại vết, không poll thì file vẫn có, và log ghi nối ch�
 
 ## 6. Trạng thái tính tới lúc bàn giao
 
-Cập nhật 2026-09-15 trên máy mới (`E:\astracode`, Node v24.14.1, pnpm 11.21.0).
+Cập nhật 2026-09-16 trên máy mới (`E:\astracode`, Node v24.14.1, pnpm 11.21.0).
 
-- **Backend `none`: ĐANG CHẠY THẬT, xanh.** Đây là backend đang phục vụ. Hai job thật trên
+- **Backend `fci`: ĐANG CHẠY THẬT** — đây là backend đang phục vụ ở `:8000`. Xem mục 6b.
+
+- **Backend `none`: đã chạy thật, xanh.** Hai job thật trên
   máy này, repo public `octocat/Spoon-Knife`, cả hai `succeeded`:
 
   | run_id | tickets_md | Thời gian | Lượt parse | evidence giữ / loại / kẹp | Kết quả |
@@ -571,24 +573,122 @@ Cập nhật 2026-09-15 trên máy mới (`E:\astracode`, Node v24.14.1, pnpm 11
 
 - Đã commit vào nhánh `feat/astraqa-server` (**chưa push**).
 
+
+## 6b. Backend `fci` chạy với gateway nào (2026-09-16)
+
+FCI hết tiền nên tạm trỏ sang **Google Gemini qua endpoint OpenAI-compatible**. Không sửa
+dòng code nào cho việc này, không đổi tên biến, không thêm nhánh riêng cho Google — chỉ đổi
+giá trị ba biến `FPT_*`. Khi FCI sống lại thì đổi ngược đúng hai giá trị.
+
+```
+ASTRACODE_JUDGE = fci
+FPT_BASE_URL    = https://generativelanguage.googleapis.com/v1beta/openai
+FPT_MODEL       = gemini-3.5-flash
+FPT_API_KEY     = <key Google, không ghi ở đây>
+```
+
+`fciJudge.mjs` cắt mọi dấu `/` cuối của `FPT_BASE_URL` rồi nối `/chat/completions`, nên có
+hay không dấu `/` cuối đều ra cùng một URL. Đường dẫn đúng thì POST không kèm key trả **400**;
+**404** mới là sai đường (khi đó nghi `FPT_MODEL` trước).
+
+### Model nào phục vụ được
+
+Đo ngày 2026-09-16, mỗi model 3 lượt với prompt cỡ thật (~2 KB):
+
+| model | kết quả |
+|---|---|
+| `gemini-3.8-flash` | 503, 503, 503 |
+| `gemini-3.7-flash` | 503, 503, 503 |
+| `gemini-3.6-flash` | 429, 503, 429 |
+| **`gemini-3.5-flash`** | **200 (11.8s), 200 (8.0s), 200 (34.5s)** |
+| `gemini-flash-latest` | 503, 503, 503 |
+| `gemini-2.5-flash` | 404, 404, 404 |
+
+`gemini-3.8-flash` **có trong `GET /models` nhưng không phục vụ** cho key này — 503
+*"currently experiencing high demand"* ở mọi lần thử, 5/5 rồi 3/3. Đừng chọn model chỉ vì nó
+có trong danh mục; phép thử đúng là `POST /chat/completions`.
+
+### Hạn mức: 20 request mỗi NGÀY mỗi model
+
+Đây là thứ chặn thật, và nó không liên quan gì đến số song song:
+
+```
+quotaId    : GenerateRequestsPerDayPerProjectPerModel-FreeTier
+quotaValue : 20
+quotaMetric: generativelanguage.googleapis.com/generate_content_free_tier_requests
+```
+
+Free tier cho **20 lượt/ngày/model**. Một ticket = một lượt, nên một ngày chấm được tối đa
+20 ticket trên một model. Hết hạn mức thì mọi lượt trả 429 cho tới hôm sau; message 429 có
+kèm `"Please retry in 49.97s"` nhưng đó là gợi ý backoff, không phải lúc quota được nạp lại
+— chờ 75 s rồi thử lại vẫn 429.
+
+**Hệ quả cho backoff hiện tại:** tổng bốn lần chờ là 2+4+8+16 = **30 s**, ngắn hơn cả con số
+Google tự đề nghị (~50 s). Với 429 loại "hết quota ngày" thì không có số nào đủ dài. Nếu sau
+này gặp 429 loại "quá nhiều request/phút" thật, cân nhắc đọc `RetryInfo.retryDelay` trong
+body thay vì dùng bảng cố định — nhưng đó là đổi hợp đồng, phải hỏi trước.
+
+**Số song song an toàn: 2** (mặc định, đổi bằng `ASTRACODE_JUDGE_CONCURRENCY`). Không đo
+được ích lợi của việc hạ xuống 1 vì trần là *mỗi ngày* chứ không phải *mỗi phút* — hạ song
+song không làm tăng số ticket chấm được trong ngày, chỉ làm job chạy lâu hơn.
+
+### Số đo của hai job thật
+
+Hai repo public khác nhau × hai định dạng `tickets_md`, chạy **chồng nhau** (song song 2),
+payload dựng bằng Node. Mỗi bộ ticket có một ticket tiếng Việt có dấu và một ticket tiếng Nhật.
+
+| run_id | repo | tickets_md | Thời gian | parse | hỏng | evidence giữ/loại/kẹp | 429 | 503 |
+|---|---|---|---:|---:|---:|---|---:|---:|
+| `RUN-GEMINI-A` | `jonschlinkert/is-odd` | heading | 129 552 ms | **3/3** | 0 | 5 / 0 / 0 | 0 | 0 |
+| `RUN-GEMINI-B` | `psf/requests` | bảng tiếng Việt | 122 020 ms | **1/3** | 2 | 0 / 0 / 0 | 3 | 9 |
+
+- **Tỉ lệ parse JSON: 4/6 lượt (67 %).** Hai lượt hỏng của job B **không phải** do Gemini trả
+  JSON xấu — cả hai đều là `judge_failed: FCI trả 503`, tức request không bao giờ tới được
+  model. **Không có lượt nào Gemini trả JSON sai schema.** Parser không bị nới một dòng nào.
+- Job A `ODD-2` là ticket tiếng Nhật (「入力が整数でない場合はエラーを投げる」) và model khớp
+  đúng vào chỗ ném `TypeError` trong `index.js` cùng ca kiểm thử trong `test.js` — đa ngữ đi
+  qua được cả đường ống.
+- `evidence_dropped = 0` và `evidence_clamped = 0` ở cả hai job: Gemini không bịa đường dẫn
+  nào trong hai lượt này.
+- Thời gian bị chi phối bởi độ trễ của model (8–34 s một lượt), không phải bởi clone hay quét.
+
+Vết trên đĩa: `tools/astraqa-server/logs/RUN-GEMINI-A.log` và `.../results/RUN-GEMINI-A.json`
+(tương tự cho `RUN-GEMINI-B`).
+
+### Ba hành vi mới thêm cùng lúc
+
+1. **Thử lại có backoff** — `lib/retry.mjs`, chỉ cho **429 và 503**, 4 lần chờ 2/4/8/16 s.
+   Mọi mã khác (400/401/403/404/422/500) ném ngay lượt đầu, không chờ.
+2. **Cách ly lỗi theo ticket** — một ticket hỏng không kéo cả job xuống nữa. Nó thành item
+   `code_status: "missing"`, `confidence: 0`, `reason: "judge_failed: …"`, và job vẫn trả về
+   những ticket đã chấm xong. **`missing` kiểu này nghĩa là "chưa biết", không phải "đã kiểm
+   tra và thấy thiếu"** — `report_md` nói thẳng câu đó, và `stats.judge_failed` đếm riêng.
+   Ngoại lệ: hỏng **hết** thì job `failed`, để AstraQA không đọc một bảng toàn `missing`
+   thành "cả repo chưa làm gì".
+3. **Trần song song cả server** — `lib/limit.mjs`, mặc định 2. Đặt ở cấp server chứ không cấp
+   job vì hạn mức tính theo API key mà key thì cả server dùng chung.
+
+`stats` có thêm bốn trường: `judge_failed`, `hits_429`, `hits_503` (và `model` đã có sẵn).
+Schema `items[]` **không đổi** — ticket hỏng vẫn là một item hợp lệ đúng ba trạng thái cũ.
 ## 7. Lệnh chạy
 
 **Khởi động** (đang chạy bằng đúng lệnh này):
 
 ```bash
 cd /e/astracode
-ASTRACODE_JUDGE=none PORT=8000 WORKSPACE_DIR="$TEMP/astracode-astraqa" \
-  node tools/astraqa-server/server.mjs
+PORT=8000 WORKSPACE_DIR="$TEMP/astracode-astraqa" node tools/astraqa-server/server.mjs
 ```
 
-Ba biến đặt ngoài là cố ý, và cả ba đều **thắng** `.env` (quy ước của `env.mjs`: biến đã
-export thắng file):
+Backend lấy theo `.env` (`ASTRACODE_JUDGE=fci`). Hai biến đặt ngoài là cố ý, và cả hai đều
+**thắng** `.env` (quy ước của `env.mjs`: biến đã export thắng file):
 
-- `ASTRACODE_JUDGE=none` — `.env` đang để `fci`, mà key FCI thì 401. `none` là backend duy
-  nhất chạy được lúc này.
 - `WORKSPACE_DIR` trỏ ra ngoài repo — `.env` để `./.workspace`, sẽ đẻ một thư mục untracked
   ngay trong repo. Thư mục này bị xoá sau mỗi job nên chẳng việc gì phải nằm trong cây nguồn.
 - `PORT=8000` — trùng `.env`, ghi ra cho rõ.
+
+Muốn ép backend khác thì thêm `ASTRACODE_JUDGE=none` (hoặc `cli`) vào đầu lệnh; muốn đổi trần
+song song thì `ASTRACODE_JUDGE_CONCURRENCY=<n>`. **Nhớ: biến export thắng `.env`, nên đặt
+`ASTRACODE_JUDGE=none` một lần rồi quên là sửa `.env` mãi cũng không có tác dụng.**
 
 Server nghe ở `127.0.0.1:8000`. AstraQA (ở `localhost:7000`) gọi vào đây; endpoint và schema
 **không đổi** so với mục 3.
@@ -597,7 +697,7 @@ Server nghe ở `127.0.0.1:8000`. AstraQA (ở `localhost:7000`) gọi vào đâ
 
 ```bash
 curl -sS http://127.0.0.1:8000/healthz
-# {"status":"ok","backend":"none","model":null,"note":"quét tất định, không gọi model"}
+# {"status":"ok","backend":"fci","model":"gemini-3.5-flash","fci_configured":true}
 ```
 
 **Tạo job** (token nạp từ `.env`, không in ra màn hình):
@@ -639,8 +739,14 @@ Xếp theo thứ tự nên gỡ:
    (hoặc để AstraQA gửi `astrawork_token` trong từng request). `/healthz` khi đó phải trả
    `{"status":"ok","backend":"cli","cli_path":"…"}`.
 
-2. **Key FCI còn tiền** — để backend `fci` dùng được. Phép thử đúng là `POST
-   /v1/chat/completions`, không phải `GET /v1/models`.
+2. **Hạn mức model — thứ chặn NẶNG NHẤT lúc này.** Free tier của Google cho **20 lượt/ngày/
+   model**, mà một ticket là một lượt. Hết là mọi job `failed` cho tới hôm sau, và số song
+   song không cứu được vì trần tính theo ngày. Ba đường gỡ, xếp theo mức đáng làm:
+   nâng lên gói trả tiền của Google; hoặc key FCI có tiền trở lại (đổi đúng hai giá trị
+   `FPT_BASE_URL` + `FPT_MODEL`, không sửa code); hoặc chia ticket sang nhiều model vì mỗi
+   model có 20 lượt riêng — nhưng tính tới 2026-09-16 chỉ `gemini-3.5-flash` phục vụ được,
+   các model flash khác đều 503. Phép thử key đúng luôn là `POST /chat/completions`, không
+   phải `GET /models`.
 
 3. **`none` không bao giờ trả `done`.** Quét từ khoá chứng minh được "có chỗ nhắc tới", không
    chứng minh được "đã làm xong"; trần của nó là `partial`. Nên mọi ticket trong hai job
@@ -650,4 +756,9 @@ Xếp theo thứ tự nên gỡ:
 4. **Chưa có xoay vòng log.** `logs/<run_id>.log` ghi nối mãi. Chạy 50 ticket × nhiều đêm thì
    nên thêm cắt theo ngày, hoặc để AstraQA đổi `run_id` mỗi lần.
 
-5. **Chưa push.** Nhánh `feat/astraqa-server` nằm ở local.
+5. **Backoff cố định 30 s có thể không đủ.** Bốn lần chờ 2/4/8/16 s tổng cộng 30 s, trong
+   khi 429 của Google tự đề nghị ~50 s. Với 429 loại "hết quota ngày" thì không số nào đủ;
+   nhưng nếu sau này gặp 429 loại burst thật, cân nhắc đọc `RetryInfo.retryDelay` trong body
+   thay cho bảng cố định.
+
+6. **Chưa push.** Nhánh `feat/astraqa-server` nằm ở local, không merge `main`.

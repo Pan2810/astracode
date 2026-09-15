@@ -23,6 +23,7 @@ import { makeRedactor, redactMessage } from './lib/redact.mjs';
 import { loadDotEnv } from './lib/env.mjs';
 import { runAnalyzeJob } from './lib/analyze.mjs';
 import { createRunLog, bannerLines } from './lib/observe.mjs';
+import { createLimiter } from './lib/limit.mjs';
 import { parseTickets } from './lib/tickets.mjs';
 
 const MAX_BODY_BYTES = 8 * 1024 * 1024;
@@ -41,6 +42,9 @@ export function readConfig(env = process.env) {
     // Nơi để lại vết của mỗi run: `<runsDir>/logs/` và `<runsDir>/results/`.
     // Khác WORKSPACE_DIR ở chỗ nó KHÔNG bị xoá sau job — đó là cả mục đích.
     runsDir: env.ASTRACODE_RUNS_DIR || here,
+    // Trần lượt judge chạy cùng lúc trên cả server. Hạn mức request/phút tính
+    // theo API key, mà key thì cả server dùng chung — nên trần phải ở đây.
+    judgeConcurrency: Math.max(1, Number(env.ASTRACODE_JUDGE_CONCURRENCY || 2) || 2),
 
     // Judge: `fci` gọi thẳng endpoint OpenAI-compatible (mặc định), `cli` spawn
     // CLI của AstraCode. Hai đường trả về cùng một schema items[].
@@ -110,6 +114,8 @@ export function createServer(config, { log = console.log, persist = true } = {})
   // Redactor cấp server: ba bí mật từ cấu hình, dùng cho mọi dòng log nằm
   // ngoài phạm vi một job (banner, dòng request, 401/404).
   const baseRedact = makeRedactor([config.serviceToken, config.astraworkJwt, config.fciApiKey]);
+  // Một limiter cho cả server, chia chung giữa mọi job đang chạy.
+  const limiter = createLimiter(config.judgeConcurrency ?? 2);
   const slog = (msg) => log(baseRedact(String(msg ?? '')));
 
   function start(job, body, runLog) {
@@ -122,7 +128,7 @@ export function createServer(config, { log = console.log, persist = true } = {})
     ]);
 
     job.status = 'running';
-    runAnalyzeJob({ job, body, config, redact, log: (m) => runLog.line(m) })
+    runAnalyzeJob({ job, body, config, redact, log: (m) => runLog.line(m), limiter })
       .then((result) => {
         job.status = 'succeeded';
         job.result = result;

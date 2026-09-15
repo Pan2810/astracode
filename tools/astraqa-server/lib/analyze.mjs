@@ -21,6 +21,7 @@ import { matchesAny } from './globs.mjs';
 import { askFci, fciConfigured } from './fciJudge.mjs';
 import { judgeWithoutModel } from './noneJudge.mjs';
 import { buildRepoContext, renderContext } from './repoContext.mjs';
+import { createLimiter } from './limit.mjs';
 
 export const DEFAULT_OPTIONS = {
   max_files_per_ticket: 5,
@@ -89,7 +90,7 @@ function runCli({ cliPath, cwd, prompt, astraworkToken, timeoutMs, signal }) {
  * Một lượt judge cho một ticket. Trả về văn bản thô của model — phần bóc JSON
  * nằm ngoài, dùng chung cho cả hai backend.
  */
-async function judgeOnce({ backend, ticket, options, repoDir, config, timeoutMs, redact, job }) {
+async function judgeOnce({ backend, ticket, options, repoDir, config, timeoutMs, redact, job, log, stats, limiter }) {
   if (backend === 'none') {
     // Không có model nên không có gì để bóc: trả thẳng object đã dựng, nhưng nó
     // vẫn đi qua `pickItem` như hai backend kia để không có đường nào lách được
@@ -121,7 +122,21 @@ async function judgeOnce({ backend, ticket, options, repoDir, config, timeoutMs,
     context: renderContext(ctx),
     promptOverride: options.prompt_override,
   });
-  const { text, usage } = await askFci({ config, prompt, timeoutMs, redact });
+  const { text, usage } = await limiter.run(() =>
+    askFci({
+      config,
+      prompt,
+      timeoutMs,
+      redact,
+      signal: job.abort?.signal,
+      onRetry: ({ status, attempt, of, waitMs, message }) => {
+        // Hạn mức của nhà cung cấp là chuyện hạ tầng, không phải lỗi code — nên
+        // nó phải hiện trong log chứ không im lặng trôi qua.
+        stats[status === 429 ? 'hits_429' : 'hits_503'] += 1;
+        log(`${ticket.key}: ${status} — chờ ${waitMs / 1000}s rồi thử lại (lần ${attempt}/${of}). ${message.slice(0, 160)}`);
+      },
+    }),
+  );
   return { text, note: `FCI ${config.fciModel}`, usage, stderr: '' };
 }
 
@@ -239,7 +254,7 @@ export async function keepRealEvidence(evidence, repoDir, options) {
   return { evidence: kept, dropped, clamped };
 }
 
-function buildReportMd({ runId, generatedAt, backend, repoUrl, ref, head, items, tickets, droppedByKey, clampedByKey, stats }) {
+function buildReportMd({ runId, generatedAt, backend, repoUrl, ref, head, items, tickets, droppedByKey, clampedByKey, failedByKey, stats }) {
   const byKey = new Map(tickets.map((t) => [t.key, t]));
   const count = (s) => items.filter((i) => i.code_status === s).length;
 
@@ -253,6 +268,17 @@ function buildReportMd({ runId, generatedAt, backend, repoUrl, ref, head, items,
   if (head) out.push(`- commit: \`${head}\``);
   out.push(`- tickets: ${items.length} — done ${count('done')}, partial ${count('partial')}, missing ${count('missing')}`);
   out.push(`- bằng chứng: giữ ${stats.evidence_kept}, loại ${stats.evidence_dropped}, kẹp ${stats.evidence_clamped}`);
+  out.push(`- lượt judge: ${stats.judge_parsed}/${stats.judge_calls} parse được${stats.judge_failed ? `, **${stats.judge_failed} lượt hỏng**` : ''}`);
+  if (stats.hits_429 || stats.hits_503) {
+    out.push(`- hạn mức nhà cung cấp: ${stats.hits_429} lần 429, ${stats.hits_503} lần 503 (đã tự thử lại)`);
+  }
+  if (stats.judge_failed) {
+    out.push('');
+    out.push(
+      `> **Cảnh báo:** ${stats.judge_failed} ticket KHÔNG chấm được. Chúng nằm trong bảng dưới với ` +
+        '`code_status: missing` và `reason: judge_failed: …` — đó là "chưa biết", KHÔNG phải "đã kiểm tra và thấy thiếu".',
+    );
+  }
   out.push('');
   out.push('| Ticket | Trạng thái ngoài | Code | Confidence | Bằng chứng |');
   out.push('|---|---|---|---:|---:|');
@@ -268,6 +294,15 @@ function buildReportMd({ runId, generatedAt, backend, repoUrl, ref, head, items,
     const t = byKey.get(it.key);
     out.push(`## ${it.key}${t?.title ? ` — ${t.title}` : ''}`);
     out.push('');
+    const failed = failedByKey.get(it.key);
+    if (failed) {
+      out.push(`- **KHÔNG chấm được** — ${failed}`);
+      if (t?.status) out.push(`- trạng thái do nguồn ngoài báo: ${t.status}`);
+      out.push('');
+      out.push('- _`missing` ở đây nghĩa là "chưa biết", không phải "đã kiểm tra và thấy thiếu"._');
+      out.push('');
+      continue;
+    }
     out.push(`- code_status: **${it.code_status}** (confidence ${it.confidence.toFixed(2)}, reason: ${it.reason})`);
     if (t?.status) out.push(`- trạng thái do nguồn ngoài báo: ${t.status}`);
     out.push('');
@@ -302,7 +337,7 @@ function buildReportMd({ runId, generatedAt, backend, repoUrl, ref, head, items,
  * Chạy job. Cập nhật `job.progress` / `job.current` tại chỗ để endpoint poll
  * đọc được ngay, trả về `result` đúng hợp đồng.
  */
-export async function runAnalyzeJob({ job, body, config, redact, log }) {
+export async function runAnalyzeJob({ job, body, config, redact, log, limiter = createLimiter(1) }) {
   const options = { ...DEFAULT_OPTIONS, ...(body.options ?? {}) };
   const timeoutMs = Math.max(1, Number(options.timeout_sec) || DEFAULT_OPTIONS.timeout_sec) * 1000;
   const maxFiles = Math.max(1, Number(options.max_files_per_ticket) || DEFAULT_OPTIONS.max_files_per_ticket);
@@ -326,6 +361,9 @@ export async function runAnalyzeJob({ job, body, config, redact, log }) {
     model: backend === 'fci' ? config.fciModel : undefined,
     judge_calls: 0,
     judge_parsed: 0,
+    judge_failed: 0,
+    hits_429: 0,
+    hits_503: 0,
     evidence_kept: 0,
     evidence_dropped: 0,
     evidence_clamped: 0,
@@ -346,6 +384,7 @@ export async function runAnalyzeJob({ job, body, config, redact, log }) {
     const items = [];
     const droppedByKey = new Map();
     const clampedByKey = new Map();
+    const failedByKey = new Map();
 
     log(`clone xong: ${tickets.length} ticket, commit ${head || '(không rõ)'} — bắt đầu chấm bằng backend ${backend}`);
 
@@ -354,21 +393,53 @@ export async function runAnalyzeJob({ job, body, config, redact, log }) {
       const ticketStartedAt = Date.now();
 
       stats.judge_calls += 1;
-      const res = await judgeOnce({ backend, ticket, options: effective, repoDir, config, timeoutMs, redact, job });
 
-      let parsed;
+      /**
+       * Một ticket hỏng không được kéo cả job xuống: 49 ticket đã chấm xong mà
+       * mất trắng vì ticket thứ 50 là kiểu hỏng đắt nhất của hệ này. Ticket hỏng
+       * thành một item `missing` với `reason` nói rõ vì sao, và `stats` đếm
+       * riêng — nên tỉ lệ parse vẫn đọc được từ `judge_parsed / judge_calls`.
+       */
+      let item;
       try {
-        parsed = res.parsed ?? extractJsonBlock(res.text);
-      } catch (err) {
-        const tail = redact(res.stderr ?? '').trim().split('\n').slice(-3).join(' ');
-        throw new Error(
-          `Ticket "${ticket.key}": ${err instanceof Error ? err.message : String(err)} ` +
-            `(${res.note}${tail ? `, stderr: ${tail}` : ''})`,
-        );
-      }
+        const res = await judgeOnce({
+          backend, ticket, options: effective, repoDir, config, timeoutMs, redact, job, log, stats, limiter,
+        });
 
-      const item = pickItem(parsed, ticket.key);
-      stats.judge_parsed += 1;
+        let parsed;
+        try {
+          parsed = res.parsed ?? extractJsonBlock(res.text);
+        } catch (err) {
+          const tail = redact(res.stderr ?? '').trim().split('\n').slice(-3).join(' ');
+          throw new Error(
+            `${err instanceof Error ? err.message : String(err)} (${res.note}${tail ? `, stderr: ${tail}` : ''})`,
+          );
+        }
+
+        item = pickItem(parsed, ticket.key);
+        stats.judge_parsed += 1;
+      } catch (err) {
+        const why = redact(err instanceof Error ? err.message : String(err));
+        stats.judge_failed += 1;
+        failedByKey.set(ticket.key, why);
+        log(
+          `[${items.length + 1}/${tickets.length}] ${ticket.key} | ${Date.now() - ticketStartedAt}ms | ` +
+            `LƯỢT HỎNG — ${why}`,
+        );
+        // `missing` + confidence 0 là cách trung thực nhất để nói "không chấm
+        // được": không bịa kết luận, mà cũng không im lặng bỏ ticket khỏi báo cáo.
+        items.push({
+          key: ticket.key,
+          code_status: 'missing',
+          confidence: 0,
+          evidence: [],
+          reason: `judge_failed: ${why}`,
+        });
+        droppedByKey.set(ticket.key, []);
+        clampedByKey.set(ticket.key, []);
+        job.progress = { done: items.length, total: tickets.length };
+        continue;
+      }
 
       const { evidence, dropped, clamped } = await keepRealEvidence(item.evidence, repoDir, effective);
       item.evidence = evidence;
@@ -392,6 +463,15 @@ export async function runAnalyzeJob({ job, body, config, redact, log }) {
       job.progress = { done: items.length, total: tickets.length };
     }
 
+    // Không lượt nào chấm được thì đừng trả về một bảng toàn `missing`: AstraQA
+    // sẽ đọc nó thành "cả repo chưa làm gì". Hỏng hết là hỏng job, nói thẳng.
+    if (tickets.length > 0 && stats.judge_parsed === 0) {
+      throw new Error(
+        `Không lượt judge nào thành công (${stats.judge_failed}/${tickets.length} ticket hỏng). ` +
+          `Lỗi đầu tiên: ${failedByKey.values().next().value ?? 'không rõ'}`,
+      );
+    }
+
     stats.duration_ms = Date.now() - startedAt;
     const generatedAt = new Date().toISOString();
     return {
@@ -410,6 +490,7 @@ export async function runAnalyzeJob({ job, body, config, redact, log }) {
         tickets,
         droppedByKey,
         clampedByKey,
+        failedByKey,
         stats,
       }),
       stats,
