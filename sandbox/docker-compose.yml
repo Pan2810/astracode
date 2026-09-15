@@ -1,0 +1,106 @@
+# AstraCode sandbox — tool `bash` của agent chạy trong container này, không chạy
+# trên máy host. Đây là kiểm soát bảo mật THẬT cho bash (xem docs/SECURITY.md §4).
+#
+# Cách dùng (AstraCode tự gọi, đây là để bạn test tay):
+#   ASTRA_WORKSPACE=/path/to/repo docker compose up -d runner
+#   docker compose exec -T runner bash -lc "ls -la"
+#
+# Ba profile mạng, đổi bằng biến ASTRA_NET_PROFILE:
+#   none       (mặc định) — không có mạng. An toàn nhất.
+#   restricted — qua egress proxy, chỉ allowlist domain trong proxy/filter.txt
+#   full       — mạng thoải mái. Chỉ bật khi bạn hiểu rủi ro exfiltration.
+
+name: astracode-sandbox
+
+services:
+  # ─── Profile: none (mặc định) ────────────────────────────────────────────
+  runner:
+    profiles: ["none"]
+    build:
+      context: .
+      dockerfile: Dockerfile.runner
+    image: astracode/runner:local
+    init: true
+    working_dir: /workspace
+    command: ["sleep", "infinity"]
+
+    # CHỈ workspace được mount. Không mount ~/.ssh, ~/.aws, không mount
+    # docker.sock (mount docker.sock = thoát sandbox trong 1 dòng lệnh).
+    volumes:
+      - ${ASTRA_WORKSPACE:?ASTRA_WORKSPACE chưa được set}:/workspace:rw
+
+    # Nạp .env của workspace vào container (nếu có). Credentials DB đi qua đây
+    # thay vì qua environment ở dưới — .env không nằm trong image nên rò rỉ
+    # image không phơi bày secret. File không tồn tại thì compose chỉ in warning,
+    # không lỗi — workspace không có .env vẫn chạy được.
+    env_file:
+      - ${ASTRA_WORKSPACE}/.env
+
+    network_mode: "none"
+
+    # Rootfs read-only; chỗ ghi được chỉ là /workspace và các tmpfs dưới đây.
+    read_only: true
+    tmpfs:
+      - /tmp:size=2g,mode=1777
+      - /home/astra:size=256m,mode=0755
+
+    user: "1000:1000"
+    cap_drop: ["ALL"]
+    security_opt:
+      - no-new-privileges:true
+
+    # Chặn fork bomb và ngốn tài nguyên.
+    pids_limit: 512
+    mem_limit: ${ASTRA_MEM_LIMIT:-2g}
+    cpus: ${ASTRA_CPU_LIMIT:-2}
+
+    environment:
+      # KHÔNG kế thừa env của host. Danh sách này là toàn bộ những gì container thấy.
+      LANG: C.UTF-8
+      CI: "true"
+
+  # ─── Profile: restricted — có mạng nhưng qua allowlist ──────────────────
+  runner-restricted:
+    profiles: ["restricted"]
+    extends:
+      service: runner
+    network_mode: ""
+    networks: [egress]
+    depends_on: [egress-proxy]
+    environment:
+      LANG: C.UTF-8
+      CI: "true"
+      HTTP_PROXY: http://egress-proxy:8888
+      HTTPS_PROXY: http://egress-proxy:8888
+      NO_PROXY: localhost,127.0.0.1
+
+  egress-proxy:
+    profiles: ["restricted"]
+    image: monokal/tinyproxy:latest
+    networks: [egress]
+    volumes:
+      - ./proxy/tinyproxy.conf:/etc/tinyproxy/tinyproxy.conf:ro
+      - ./proxy/filter.txt:/etc/tinyproxy/filter:ro
+    read_only: true
+    tmpfs: ["/tmp"]
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 256m
+
+  # ─── Profile: full — không giới hạn mạng ────────────────────────────────
+  runner-full:
+    profiles: ["full"]
+    extends:
+      service: runner
+    network_mode: ""
+    networks: [egress]
+    # host.docker.internal → IP của host. Cần khi DB (Postgres) chạy trên máy
+    # người dùng: container dùng "localhost" sẽ trỏ vào chính container, không
+    # tới host. Trên Linux cần extra_hosts này; Docker Desktop (macOS/Windows)
+    # tự có sẵn nên không hại nhưng cũng không thừa.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+networks:
+  egress:
+    driver: bridge

@@ -1,0 +1,26 @@
+node_modules/
+dist/
+*.tsbuildinfo
+.DS_Store
+
+# Gói phát hành — build lại bằng `pnpm package`
+*.vsix
+
+# Bí mật — không bao giờ commit
+.env
+.env.*
+!.env.example
+
+# Kết quả eval có thể chứa nội dung response của model
+evals/results/
+
+# Log của AstraCode (đã redact nhưng vẫn không thuộc về repo)
+.astra/logs/
+
+# B?n sao workspace c?a skill chat-verify ? khong thu?c v? repo
+.verify-baseline/
+
+# Virtualenv Python cua nguoi dung
+.venv/
+.tmp
+documents

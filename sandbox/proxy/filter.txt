@@ -1,0 +1,26 @@
+# Allowlist domain cho profile `restricted`.
+# tinyproxy đọc file này với FilterDefaultDeny Yes → không có trong đây = chặn.
+# Cú pháp: regex khớp hostname.
+#
+# Thêm domain nào cũng là mở rộng bề mặt exfiltration. Cân nhắc từng dòng.
+
+# npm
+^registry\.npmjs\.org$
+^registry\.yarnpkg\.com$
+
+# Python
+^pypi\.org$
+^files\.pythonhosted\.org$
+
+# Go
+^proxy\.golang\.org$
+^sum\.golang\.org$
+
+# Git hosting (clone dependency, không phải để push)
+^github\.com$
+^codeload\.github\.com$
+^objects\.githubusercontent\.com$
+^raw\.githubusercontent\.com$
+
+# Nội bộ — sửa cho đúng hạ tầng của bạn
+# ^nexus\.congty\.local$

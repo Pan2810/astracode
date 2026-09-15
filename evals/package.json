@@ -1,0 +1,15 @@
+{
+  "name": "@astra/evals",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "M2.5 — đo chất lượng agent. Với sản phẩm agent, eval đóng vai trò của unit test.",
+  "scripts": {
+    "eval": "tsx run.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@astra/core": "workspace:*"
+  }
+}

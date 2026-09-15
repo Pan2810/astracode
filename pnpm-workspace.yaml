@@ -1,0 +1,13 @@
+packages:
+  - packages/*
+  - evals
+
+allowBuilds:
+  # esbuild cần chạy script cài đặt để lấy binary theo nền tảng (vitest dùng nó).
+  esbuild: true
+
+  # Hai cái dưới chỉ cần khi PUBLISH lên Marketplace (ký gói, lưu credential).
+  # Chúng ta chỉ `vsce package` thành .vsix để cài tay, nên không chạy script
+  # cài đặt của chúng — bớt một binary lạ chạy trên máy build.
+  '@vscode/vsce-sign': false
+  keytar: false

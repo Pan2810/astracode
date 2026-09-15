@@ -1,0 +1,31 @@
+{
+  "name": "astracode",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Coding agent cho VS Code, chạy trên model FPT Cloud, AI local qua gateway AstraWork",
+  "packageManager": "pnpm@11.21.0",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "pnpm -r build",
+    "test": "pnpm -r test",
+    "_comment": "typecheck của packages/vscode đọc .d.ts của core, nên core phải build trước",
+    "typecheck": "pnpm --filter @astra/core build && pnpm -r typecheck",
+    "lint": "eslint .",
+    "package": "pnpm --filter @astra/core build && pnpm --filter astracode package",
+    "demo": "pnpm --filter @astra/core demo",
+    "eval": "pnpm --filter @astra/evals eval",
+    "eval:list": "pnpm --filter @astra/evals eval -- --list"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.18.0",
+    "@types/node": "^22.10.5",
+    "eslint": "^9.18.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3",
+    "typescript-eslint": "^8.20.0",
+    "vitest": "^3.0.2"
+  }
+}

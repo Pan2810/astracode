@@ -1,0 +1,385 @@
+{
+  "name": "astracode",
+  "displayName": "AstraCode",
+  "description": "Coding agent running on AstraWork models",
+  "version": "0.0.44",
+  "publisher": "astracode",
+  "license": "MIT",
+  "icon": "media/icon.png",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "// TODO-publish": "Điền repository, bugs, homepage thật trước khi chạy vsce publish. Hiện chưa có vì repo chưa public.",
+  "// contributes.configuration": "KHÔNG thêm ô cấu hình cho địa chỉ AstraWork. Gateway và trang web là hằng số trong code (packages/core/src/config/endpoints.ts) — cả tổ chức dùng một hạ tầng, nên một ô ở đây chỉ tạo thêm cách trỏ sai chỗ, và bảng settings được Marketplace render nguyên văn ở tab Feature Contributions nên nó cũng là đăng địa chỉ hạ tầng lên một trang công khai. Ghi chú này để Ở NGOÀI `properties` vì VS Code validate mọi entry trong đó như một JSON-schema object.",
+  "categories": [
+    "AI",
+    "Programming Languages"
+  ],
+  "keywords": [
+    "ai",
+    "agent",
+    "fpt",
+    "astrawork",
+    "copilot"
+  ],
+  "main": "./dist/extension.js",
+  "_comment_activation": "onStartupFinished để status bar hiện ngay, không phải chờ mở view.",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "_comment_trust": "Workspace chưa tin cậy: extension vẫn chạy nhưng CHỈ ĐỌC — không MCP, không command từ repo, không tool ghi file. Việc ép các giới hạn đó nằm trong code (McpService, ChatController.canWrite), khai báo này chỉ để VS Code nói đúng với người dùng.",
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": "limited",
+      "description": "Read-only: the agent can answer questions about your code but cannot edit files, run commands, or load MCP servers and slash commands from the repo."
+    }
+  },
+  "contributes": {
+    "_comment_chat_title": "Thanh tiêu đề của chat CHỈ có hai nút: 'Hội thoại mới' và 'Hội thoại cũ'. KHÔNG thêm mục nào vào các group khác của view/title: một mục thứ ba sinh ra nút '...' ngay cạnh hai nút kia, và cái nút đó lấy chỗ của đúng hai việc người dùng bấm hằng ngày. Dừng lượt đã có nút cạnh ô nhập; cài đặt có nút bánh răng trong panel; xem log gọi từ Command Palette.",
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "astracode",
+          "title": "AstraCode",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "astracode": [
+        {
+          "id": "astracode.chat",
+          "name": "Chat",
+          "type": "webview"
+        },
+        {
+          "id": "astra.changesView",
+          "name": "Session changes",
+          "icon": "media/icon.svg",
+          "contextualTitle": "AstraCode — changes"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "astra.stopChat",
+        "title": "AstraCode: Stop the running turn",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "astra.newChat",
+        "title": "AstraCode: New chat",
+        "icon": "$(add)"
+      },
+      {
+        "command": "astra.undo",
+        "title": "AstraCode: Undo the last turn",
+        "icon": "$(discard)"
+      },
+      {
+        "command": "astra.resumeSession",
+        "title": "AstraCode: Reopen a past session",
+        "icon": "$(history)"
+      },
+      {
+        "command": "astra.chatHistory",
+        "title": "AstraCode: Chat history",
+        "icon": "$(history)"
+      },
+      {
+        "command": "astra.editMemory",
+        "title": "AstraCode: Edit the project ASTRA.md"
+      },
+      {
+        "command": "astra.pinToChat",
+        "title": "AstraCode: Add to Chat"
+      },
+      {
+        "command": "astra.manageMcp",
+        "title": "AstraCode: Manage MCP servers",
+        "icon": "$(plug)"
+      },
+      {
+        "command": "astra.showProjectAgents",
+        "title": "AstraCode: Show the project agent standard"
+      },
+      {
+        "command": "astra.revokeHooks",
+        "title": "AstraCode: Forget all approved hooks"
+      },
+      {
+        "command": "astra.openChat",
+        "title": "AstraCode: Open chat",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "astra.openSettings",
+        "title": "AstraCode: Open settings",
+        "icon": "$(gear)"
+      },
+      {
+        "command": "astra.togglePrimarySidebar",
+        "title": "AstraCode: Toggle the primary side bar",
+        "icon": "$(layout-sidebar-left)"
+      },
+      {
+        "command": "astra.toggleSecondarySidebar",
+        "title": "AstraCode: Toggle the secondary side bar",
+        "icon": "$(layout-sidebar-right)"
+      },
+      {
+        "command": "astra.selectModel",
+        "title": "AstraCode: Select model"
+      },
+      {
+        "command": "astra.signIn",
+        "title": "AstraCode: Sign in to AstraWork"
+      },
+      {
+        "command": "astra.signOut",
+        "title": "AstraCode: Sign out"
+      },
+      {
+        "command": "astra.testConnection",
+        "title": "AstraCode: Test connection"
+      },
+      {
+        "command": "astra.copyToken",
+        "title": "AstraCode: Copy AstraWork token"
+      },
+      {
+        "command": "astra.showLogs",
+        "title": "AstraCode: Show logs"
+      },
+      {
+        "command": "astra.changes.openDiff",
+        "title": "AstraCode: Show file changes",
+        "category": "AstraCode",
+        "icon": "$(diff)"
+      },
+      {
+        "command": "astra.changes.accept",
+        "title": "AstraCode: Accept change",
+        "category": "AstraCode",
+        "icon": "$(check)"
+      },
+      {
+        "command": "astra.changes.reject",
+        "title": "AstraCode: Reject change",
+        "category": "AstraCode",
+        "icon": "$(discard)"
+      },
+      {
+        "command": "astra.changes.acceptAll",
+        "title": "AstraCode: Accept all changes",
+        "category": "AstraCode",
+        "icon": "$(check-all)"
+      },
+      {
+        "command": "astra.changes.revertAll",
+        "title": "AstraCode: Revert all changes",
+        "category": "AstraCode",
+        "icon": "$(discard)"
+      },
+      {
+        "command": "astra.setPermissionMode",
+        "title": "AstraCode: Change permission mode",
+        "category": "AstraCode",
+        "icon": "$(shield)"
+      }
+    ],
+    "menus": {
+      "commandPalette": [
+        {
+          "command": "astra.togglePrimarySidebar",
+          "when": "false"
+        },
+        {
+          "command": "astra.toggleSecondarySidebar",
+          "when": "false"
+        },
+        {
+          "command": "astra.changes.openDiff",
+          "when": "false"
+        },
+        {
+          "command": "astra.changes.accept",
+          "when": "false"
+        },
+        {
+          "command": "astra.changes.reject",
+          "when": "false"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "astra.newChat",
+          "when": "view == astracode.chat",
+          "group": "navigation@1"
+        },
+        {
+          "command": "astra.chatHistory",
+          "when": "view == astracode.chat",
+          "group": "navigation@2"
+        },
+        {
+          "command": "astra.changes.acceptAll",
+          "when": "view == astra.changesView",
+          "group": "navigation@1"
+        },
+        {
+          "command": "astra.changes.revertAll",
+          "when": "view == astra.changesView",
+          "group": "navigation@2"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "astra.changes.openDiff",
+          "when": "view == astra.changesView && viewItem =~ /^astraChange/",
+          "group": "inline@1"
+        },
+        {
+          "command": "astra.changes.accept",
+          "when": "view == astra.changesView && viewItem == astraChangePending",
+          "group": "inline@2"
+        },
+        {
+          "command": "astra.changes.reject",
+          "when": "view == astra.changesView && viewItem =~ /^astraChange/",
+          "group": "inline@3"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "astra.pinToChat",
+          "when": "editorTextFocus",
+          "group": "astracode@1"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "AstraCode",
+      "properties": {
+        "astra.model": {
+          "type": "string",
+          "default": "GLM-5.2",
+          "description": "Model used for coding work — editing files, running commands, titles and summaries. Leave empty to use the model AstraCode ships with."
+        },
+        "astra.planModel": {
+          "type": "string",
+          "default": "DeepSeek-V4-Flash",
+          "description": "Model used for reading images and for planning while plan mode is on. Leave empty to use the model AstraCode ships with."
+        },
+        "astra.logLevel": {
+          "type": "string",
+          "enum": [
+            "debug",
+            "info",
+            "warn",
+            "error"
+          ],
+          "default": "info",
+          "description": "Log level. Every log line goes through the redactor."
+        },
+        "astra.permissionMode": {
+          "type": "string",
+          "enum": [
+            "plan",
+            "ask",
+            "acceptEdits"
+          ],
+          "enumDescriptions": [
+            "Read-only. Every file edit and command is blocked in the core layer.",
+            "Ask before every file edit or command.",
+            "Auto-approve file edits. Shell commands always still need approval."
+          ],
+          "default": "ask",
+          "description": "Default agent permissions when a new session starts."
+        },
+        "astra.sandbox": {
+          "type": "string",
+          "enum": [
+            "off",
+            "docker",
+            "host"
+          ],
+          "enumDescriptions": [
+            "No command-running tool at all.",
+            "Run commands in a Docker container configured under sandbox/. This is the safe choice.",
+            "Run commands DIRECTLY on your machine, with no isolation. Every command has your full privileges."
+          ],
+          "default": "host",
+          "description": "Where the bash tool runs commands. AstraCode never silently falls back from docker to host."
+        },
+        "astra.sandbox.network": {
+          "type": "string",
+          "enum": [
+            "none",
+            "restricted",
+            "full"
+          ],
+          "enumDescriptions": [
+            "The container has no network.",
+            "Network through the allowlist proxy in sandbox/proxy/filter.txt.",
+            "Unrestricted network. Only turn this on if you understand the data-leak risk."
+          ],
+          "default": "none",
+          "description": "Network profile of the sandbox container. Only you can change it; the agent cannot widen it."
+        },
+        "astra.sandbox.dir": {
+          "type": "string",
+          "default": "sandbox",
+          "description": "Folder holding the sandbox docker-compose.yml. Relative paths resolve from the workspace."
+        },
+        "astra.autoCompact": {
+          "type": "boolean",
+          "default": true,
+          "description": "Summarise the start of the conversation when the context window fills up, so a turn does not break mid-way. With this off you have to run /compact yourself."
+        },
+        "astra.mcp": {
+          "type": "string",
+          "enum": [
+            "off",
+            "on"
+          ],
+          "enumDescriptions": [
+            "Do not load any MCP server.",
+            "Load the MCP servers you enabled in the sandbox/mcp/servers.json catalog."
+          ],
+          "default": "off",
+          "scope": "application",
+          "markdownDescription": "Enable MCP servers (M7). Each server is **someone else's code** running next to yours, so this is off by default, every server needs explicit approval, and none run in an untrusted workspace."
+        },
+        "astra.verifyCommand": {
+          "type": "string",
+          "default": "",
+          "scope": "application",
+          "markdownDescription": "Command to run after every turn where the agent edited files, e.g. `pnpm test`. Requires `astra.sandbox`. **Only honoured from user settings** — a value in the repo's `.vscode/settings.json` is ignored, because that command comes from whoever opened a PR."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "node esbuild.mjs",
+    "build:prod": "node esbuild.mjs --minify",
+    "watch": "node esbuild.mjs --watch",
+    "icon": "node scripts/make-icon.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run --passWithNoTests",
+    "prePublish": "pnpm --filter @astra/core build && node esbuild.mjs --minify",
+    "package": "node esbuild.mjs --minify && vsce package --no-dependencies --allow-missing-repository --out astracode.vsix"
+  },
+  "_comment_deps": "@astra/core nằm ở devDependencies CÓ CHỦ Ý: esbuild đã bundle nó vào dist/extension.js, và giao thức workspace:* làm `vsce package` thất bại. Vì vậy `vsce` chạy kèm --no-dependencies.",
+  "devDependencies": {
+    "@astra/core": "workspace:*",
+    "@types/vscode": "^1.90.0",
+    "@vscode/vsce": "^3.2.2",
+    "esbuild": "^0.24.2",
+    "marked": "^15.0.6",
+    "dompurify": "^3.2.3",
+    "@types/dompurify": "^3.0.5",
+    "web-tree-sitter": "^0.22.6",
+    "tree-sitter-wasms": "^0.1.13"
+  }
+}

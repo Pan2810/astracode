@@ -1,0 +1,13 @@
+<!--
+  Icon activity bar. VS Code PHỦ MỘT MÀU lên hình này theo theme, nên nó phải
+  là bóng đơn sắc — logo màu dán vào đây chỉ ra một vệt đặc, không đọc được.
+
+  Lấy mô-típ ngôi sao bốn cánh của logo AstraWork, giữ ba ngôi thay vì đủ năm:
+  ở 16px thật (kích thước activity bar) năm hình chồng nhau thành một đám nhoè.
+  Bản màu đầy đủ vẫn là media/icon.png, chỗ đó có đủ điểm ảnh để đọc.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor">
+  <path d="M12 2 Q12.6 11.4 15.6 12 Q12.6 12.6 12 22 Q11.4 12.6 8.4 12 Q11.4 11.4 12 2 Z"/>
+  <path d="M5.6 6 Q6.2 11.4 9 12 Q6.2 12.6 5.6 18 Q5 12.6 2.4 12 Q5 11.4 5.6 6 Z"/>
+  <path d="M18.4 6 Q19 11.4 21.6 12 Q19 12.6 18.4 18 Q17.8 12.6 15 12 Q17.8 11.4 18.4 6 Z"/>
+</svg>

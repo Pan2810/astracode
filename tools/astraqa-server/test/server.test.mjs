@@ -1,0 +1,224 @@
+/**
+ * Đường ống đầy đủ, chạy offline: repo git thật dựng trong thư mục tạm, CLI
+ * đóng thế bằng `test/fakeCli.mjs`. Không cần mạng, không cần gateway, không
+ * tốn token nào — nhưng đi qua đúng mọi bước mà bản chạy thật đi.
+ */
+import { test, before, after } from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { createServer } from '../server.mjs';
+
+const run = promisify(execFile);
+const here = path.dirname(fileURLToPath(import.meta.url));
+const TOKEN = 'service-token-dung-cho-test-0123456789';
+
+let tmp;
+let server;
+let base;
+const fixture = (n) => fs.readFile(path.join(here, '..', 'fixtures', n), 'utf8');
+
+/** Một repo git thật, nội dung tuỳ ý — server không được biết gì về nó. */
+async function makeRepo(name, files) {
+  const dir = path.join(tmp, name);
+  await fs.mkdir(dir, { recursive: true });
+  for (const [rel, content] of Object.entries(files)) {
+    await fs.mkdir(path.dirname(path.join(dir, rel)), { recursive: true });
+    await fs.writeFile(path.join(dir, rel), content);
+  }
+  await run('git', ['init', '-q', '-b', 'main'], { cwd: dir });
+  await run('git', ['add', '-A'], { cwd: dir });
+  await run(
+    'git',
+    ['-c', 'user.email=t@example.invalid', '-c', 'user.name=t', 'commit', '-q', '-m', 'init'],
+    { cwd: dir },
+  );
+  return pathToFileURL(dir).href;
+}
+
+async function post(body, token = TOKEN) {
+  return fetch(`${base}/api/v1/analyze`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+    body: JSON.stringify(body),
+  });
+}
+
+async function poll(jobId, { tries = 200 } = {}) {
+  for (let i = 0; i < tries; i++) {
+    const res = await fetch(`${base}/api/v1/analyze/${jobId}`, { headers: { Authorization: `Bearer ${TOKEN}` } });
+    const json = await res.json();
+    if (json.status === 'succeeded' || json.status === 'failed') return json;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  throw new Error('job không kết thúc trong thời gian chờ');
+}
+
+before(async () => {
+  tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'astraqa-test-'));
+  server = createServer(
+    {
+      port: 0,
+      workspaceDir: path.join(tmp, 'ws'),
+      cliPath: path.join(here, 'fakeCli.mjs'),
+      astraworkJwt: '',
+      serviceToken: TOKEN,
+      // Test chạy offline nên dùng backend `cli` với CLI đóng thế; backend `fci`
+      // được phủ riêng ở fci.test.mjs (không gọi mạng).
+      judgeBackend: 'cli',
+      fciBaseUrl: '',
+      fciApiKey: '',
+      fciModel: '',
+    },
+    { log: () => {} },
+  );
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  base = `http://127.0.0.1:${server.address().port}`;
+});
+
+after(async () => {
+  await new Promise((r) => server.close(r));
+  await fs.rm(tmp, { recursive: true, force: true, maxRetries: 3 }).catch(() => {});
+});
+
+test('GET /healthz → 200 ok và khai rõ backend đang chạy', async () => {
+  const res = await fetch(`${base}/healthz`);
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(body.status, 'ok');
+  assert.equal(body.backend, 'cli');
+  assert.ok(!JSON.stringify(body).includes('FPT_API_KEY'), 'healthz không được lộ key');
+});
+
+test('result mang theo backend đã dùng', async () => {
+  const repoUrl = await makeRepo('repo-backend', { 'x.txt': 'mot\nhai\n' });
+  const done = await poll((await (await post({ repo_url: repoUrl, tickets_md: '## K-BE — x' })).json()).job_id);
+  assert.equal(done.status, 'succeeded', done.error);
+  assert.equal(done.result.backend, 'cli');
+  assert.equal(done.result.stats.judge_calls, 1);
+  assert.equal(done.result.stats.judge_parsed, 1);
+});
+
+test('thiếu/sai token → 401', async () => {
+  assert.equal((await post({ repo_url: 'x', tickets_md: 'y' }, '')).status, 401);
+  assert.equal((await post({ repo_url: 'x', tickets_md: 'y' }, 'sai-token-nhung-dung-do-dai-012345678')).status, 401);
+});
+
+test('thiếu field bắt buộc → 400 và nói rõ thiếu gì', async () => {
+  const res = await post({ ref: 'main' });
+  assert.equal(res.status, 400);
+  const { error } = await res.json();
+  assert.match(error, /repo_url/);
+  assert.match(error, /tickets_md/);
+});
+
+test('job_id lạ → 404', async () => {
+  const res = await fetch(`${base}/api/v1/analyze/khong-co-that`, { headers: { Authorization: `Bearer ${TOKEN}` } });
+  assert.equal(res.status, 404);
+});
+
+test('repo A + tickets heading: chạy hết, bằng chứng bịa bị loại', async () => {
+  const repoUrl = await makeRepo('repo-a', {
+    'src/login.ts': 'export function login() {\n  return true;\n}\n',
+    'README.md': '# repo a\n\nmot hai ba\n',
+  });
+  const res = await post({ run_id: 'RUN-A', repo_url: repoUrl, tickets_md: await fixture('tickets-heading.md') });
+  assert.equal(res.status, 202);
+  const { job_id, status } = await res.json();
+  assert.equal(status, 'queued');
+
+  const done = await poll(job_id);
+  assert.equal(done.status, 'succeeded', done.error);
+  const { result } = done;
+
+  assert.equal(result.run_id, 'RUN-A');
+  assert.match(result.generated_at, /^\d{4}-\d{2}-\d{2}T/);
+  assert.deepEqual(
+    result.items.map((i) => i.key),
+    ['WEB-1001', '1024', 'EXP_7'],
+  );
+  for (const item of result.items) {
+    assert.ok(['done', 'partial', 'missing'].includes(item.code_status));
+    assert.ok(item.confidence >= 0 && item.confidence <= 1);
+    for (const ev of item.evidence) {
+      assert.ok(['src/login.ts', 'README.md'].includes(ev.path), `đường dẫn lạ: ${ev.path}`);
+      assert.match(ev.lines, /^\d+(-\d+)?$/);
+    }
+    assert.ok(!item.evidence.some((e) => e.path.startsWith('khong/ton/tai')), 'đường dẫn bịa phải bị loại');
+  }
+  assert.match(result.report_md, /WEB-1001/);
+  assert.match(result.report_md, /EXP_7/);
+});
+
+test('repo B + tickets bảng: cùng server, không có gì set cứng theo repo A', async () => {
+  const repoUrl = await makeRepo('repo-b', {
+    'app/main.py': 'def upload(f):\n    return None\n',
+    'docs/guide.md': 'huong dan\n',
+  });
+  const done = await poll(
+    (await (await post({ run_id: 'RUN-B', repo_url: repoUrl, tickets_md: await fixture('tickets-table.md') })).json())
+      .job_id,
+  );
+  assert.equal(done.status, 'succeeded', done.error);
+  assert.deepEqual(
+    done.result.items.map((i) => i.key),
+    ['#77', 'ABC_42', 'ops.deploy.v2'],
+  );
+  for (const ev of done.result.items.flatMap((i) => i.evidence)) {
+    assert.ok(['app/main.py', 'docs/guide.md'].includes(ev.path), `đường dẫn lạ: ${ev.path}`);
+  }
+});
+
+test('exclude_globs và max_files_per_ticket được tôn trọng', async () => {
+  const repoUrl = await makeRepo('repo-c', {
+    'a.txt': 'mot\nhai\n',
+    'dist/built.js': 'console.log(1)\n',
+  });
+  const done = await poll(
+    (
+      await (
+        await post({
+          run_id: 'RUN-C',
+          repo_url: repoUrl,
+          tickets_md: '## ONE — chỉ một ticket',
+          options: { max_files_per_ticket: 1, exclude_globs: ['**/dist/**'] },
+        })
+      ).json()
+    ).job_id,
+  );
+  assert.equal(done.status, 'succeeded', done.error);
+  const ev = done.result.items[0].evidence;
+  assert.ok(ev.length <= 1, 'phải cắt theo max_files_per_ticket');
+  assert.ok(!ev.some((e) => e.path.startsWith('dist/')), 'exclude_globs phải cắt dist/');
+});
+
+test('tickets_md không dò được → failed, KHÔNG phải items rỗng', async () => {
+  const repoUrl = await makeRepo('repo-d', { 'x.txt': 'x\n' });
+  const done = await poll((await (await post({ repo_url: repoUrl, tickets_md: 'chỉ là văn xuôi' })).json()).job_id);
+  assert.equal(done.status, 'failed');
+  assert.match(done.error, /không dò ra ticket nào/);
+  assert.equal(done.result, undefined);
+});
+
+test('clone hỏng → failed, và message KHÔNG chứa repo_token', async () => {
+  const secret = 'ghp_TESTTOKENKHONGDUOCLORA0123456789';
+  const done = await poll(
+    (
+      await (
+        await post({
+          repo_url: 'https://example.invalid/khong-co-that.git',
+          repo_token: secret,
+          tickets_md: '## K-1 — x',
+        })
+      ).json()
+    ).job_id,
+  );
+  assert.equal(done.status, 'failed');
+  assert.match(done.error, /git clone thất bại/);
+  assert.ok(!done.error.includes(secret), `lộ repo_token: ${done.error}`);
+  assert.ok(!done.error.includes('x-access-token:'), `lộ userinfo: ${done.error}`);
+});

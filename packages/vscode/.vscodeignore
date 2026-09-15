@@ -1,0 +1,27 @@
+# File .vsix cũ — không bao giờ đóng gói một .vsix trong .vsix khác.
+*.vsix
+
+# Mọi thứ đã được esbuild bundle vào dist/ — VSIX chỉ cần bundle, icon và css.
+
+src/**
+scripts/**
+
+# Logo gốc 512px — nguồn để scripts/make-icon.mjs sinh ra media/icon.png. Chỉ
+# icon.png mới được dùng lúc chạy, nên bản gốc không cần nằm trong vsix.
+media/logo.png
+node_modules/**
+.vscode/**
+
+esbuild.mjs
+tsconfig.json
+vitest.config.ts
+**/*.ts
+**/*.map
+**/tsconfig.*
+**/.eslintrc*
+
+# Không đóng gói file nhạy cảm dù có lỡ nằm ở đây (SECURITY.md §7)
+**/.env
+**/.env.*
+**/*.pem
+**/*.key

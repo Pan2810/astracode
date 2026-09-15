@@ -1,0 +1,2215 @@
+/* Dùng biến theme của VS Code — không tự chọn màu, để hợp cả light lẫn dark. */
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  display: flex;
+  flex-direction: column;
+  /* Mốc neo cho các lớp phủ (.modal, .gate) — không có nó thì chúng bám
+     viewport, đúng ở panel nhưng lệch khi chat mở thành tab editor. */
+  position: relative;
+  font-family: var(--vscode-font-family);
+  font-size: var(--vscode-font-size);
+  color: var(--vscode-foreground);
+  background: var(--vscode-sideBar-background);
+}
+
+/* ── Banner ─────────────────────────────────────────────────────────────── */
+
+.banner {
+  flex: 0 0 auto;
+  padding: 8px 12px;
+  line-height: 1.45;
+  border-bottom: 1px solid var(--vscode-panel-border);
+}
+
+.banner.blocked {
+  background: var(--vscode-inputValidation-errorBackground);
+  border-left: 3px solid var(--vscode-inputValidation-errorBorder);
+}
+
+.banner.info {
+  background: var(--vscode-inputValidation-warningBackground);
+  border-left: 3px solid var(--vscode-inputValidation-warningBorder);
+}
+
+/* ── Danh sách tin nhắn ─────────────────────────────────────────────────── */
+
+/* ── Timeline ─────────────────────────────────────────────────────────────
+   Mỗi mục trong hội thoại là một mốc trên một đường dọc: chấm ở rail, một gạch
+   ngang ngắn dẫn vào nội dung.
+
+       ○──── bạn hỏi
+       │
+       ●──── read_file
+       │
+       ○──── câu trả lời
+
+   Vì sao dựng bằng pseudo-element chứ không thêm thẻ: mọi thứ rơi vào .messages
+   đều là mốc — câu hỏi, khối tool, hộp duyệt quyền, ghi chú, lỗi. Bắt mỗi chỗ
+   append phải tự bọc thêm một lớp DOM nghĩa là chỗ nào quên bọc thì mục đó rơi
+   ra ngoài mạch, và người ta chỉ phát hiện khi nhìn thấy nó lệch.
+
+   Rail vẽ trên TỪNG mục chứ không phải một đường liền trên .messages: .messages
+   là khung cuộn, mà `bottom` của một absolute con trong khung cuộn tính theo
+   chiều cao NHÌN THẤY, nên một đường liền sẽ đứng yên trong lúc nội dung trôi. */
+
+/* Khung chat + lớp giữa trang. `min-height: 0` là thứ giữ cho khung tin nhắn
+   cuộn được: thiếu nó, một flex item mặc định không co xuống dưới nội dung của
+   chính nó, và cả trang dài ra thay vì phần tin nhắn tự cuộn. */
+.chat-area {
+  position: relative;
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.messages {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: 12px 12px 12px 30px;
+}
+
+/* ── Lớp giữa trang ────────────────────────────────────────────────────────
+   Phủ lên khung tin nhắn, chỉ hiện khi hội thoại còn trống (xem applyIdle
+   trong webview/chat.ts). Không bắt chữ, không bắt chuột: nó là một lời nhắn
+   thoáng qua, không phải một khối để thao tác. */
+
+.idle {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  pointer-events: none;
+  text-align: center;
+}
+
+.idle-status {
+  max-width: 34em;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.95em;
+  line-height: 1.5;
+}
+
+/* Hiện dần trong một nhịp ngắn: chữ bật ra giữa một khoảng trống đọc thành một
+   cảnh báo vừa nảy lên, và mắt sẽ rời khỏi chỗ đang gõ. */
+.idle-status:not([hidden]) {
+  animation: idle-in 220ms ease-out;
+}
+
+@keyframes idle-in {
+  from {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .idle-status:not([hidden]) {
+    animation: none;
+  }
+}
+
+.messages > * {
+  position: relative;
+}
+
+/*
+ * Rail dọc + gạch ngang trong MỘT pseudo-element, bằng hai lớp background.
+ * Gộp lại vì ::before/::after chỉ có hai suất, mà chấm đã chiếm mất một.
+ */
+.messages > *::before {
+  content: '';
+  position: absolute;
+  left: -22px;
+  top: 0;
+  /* Ăn xuống dưới để nối liền qua khoảng cách giữa hai mục. Thừa vài px chồng
+     lên mục sau cũng không thấy được: cùng màu, cùng toạ độ. */
+  bottom: -14px;
+  width: 22px;
+  background:
+    linear-gradient(var(--vscode-panel-border), var(--vscode-panel-border)) 4px 0 / 1px 100%
+      no-repeat,
+    linear-gradient(var(--vscode-panel-border), var(--vscode-panel-border)) 9px 9px / 12px 1px
+      no-repeat;
+}
+
+/* Mục cuối: rail dừng ở chấm, không thò ra một đoạn cụt. */
+.messages > *:last-child::before {
+  bottom: auto;
+  height: 10px;
+}
+
+.messages > *::after {
+  content: '';
+  position: absolute;
+  left: -22px;
+  top: 5px;
+  width: 9px;
+  height: 9px;
+  border: 1.5px solid var(--vscode-panel-border);
+  border-radius: 50%;
+  background: var(--vscode-sideBar-background);
+}
+
+/* Màu chấm = trạng thái của mốc. Đây là chỗ DUY NHẤT nói trạng thái ở tầng
+   timeline, nên nó phải phân biệt được cả khi panel hẹp và mục bị cắt cụt. */
+
+.msg.user::after {
+  border-color: var(--vscode-focusBorder);
+  background: var(--vscode-focusBorder);
+}
+
+.tool.running::after,
+.activity::after {
+  border-color: var(--vscode-charts-blue, var(--vscode-focusBorder));
+  animation: pulse 1.2s ease-in-out infinite;
+}
+
+.tool.done::after {
+  border-color: var(--vscode-testing-iconPassed, var(--vscode-charts-green));
+}
+
+.tool.failed::after,
+.error-box::after {
+  border-color: var(--vscode-errorForeground);
+  background: var(--vscode-errorForeground);
+}
+
+.warning::after {
+  border-color: var(--vscode-inputValidation-warningBorder);
+  background: var(--vscode-inputValidation-warningBackground);
+}
+
+.permission::after {
+  border-color: var(--vscode-focusBorder);
+  background: var(--vscode-inputValidation-warningBackground);
+}
+
+/* Ghi chú và dấu vết phiên cũ là mốc phụ — chấm nhỏ hơn, lùi về nền. */
+.note::after,
+.meta::after,
+.tool.restored::after {
+  top: 7px;
+  width: 5px;
+  height: 5px;
+  left: -20px;
+  border-width: 1px;
+  background: var(--vscode-panel-border);
+}
+
+.msg {
+  margin-bottom: 14px;
+}
+
+.msg.user .msg-body {
+  padding: 6px 10px;
+  border-radius: 4px;
+  background: var(--vscode-input-background);
+  border-left: 2px solid var(--vscode-focusBorder);
+  white-space: pre-wrap;
+}
+
+.msg-body {
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.msg-body p {
+  margin: 0 0 8px;
+}
+
+.msg-body p:last-child {
+  margin-bottom: 0;
+}
+
+.msg-body ul,
+.msg-body ol {
+  margin: 0 0 8px;
+  padding-left: 20px;
+}
+
+.msg-body code {
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: var(--vscode-textCodeBlock-background);
+  font-family: var(--vscode-editor-font-family);
+  font-size: 0.92em;
+}
+
+.msg-body pre {
+  margin: 0 0 8px;
+  padding: 8px 10px;
+  overflow-x: auto;
+  border-radius: 4px;
+  background: var(--vscode-textCodeBlock-background);
+}
+
+.msg-body pre code {
+  padding: 0;
+  background: none;
+}
+
+.msg-body table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-bottom: 8px;
+}
+
+.msg-body th,
+.msg-body td {
+  padding: 3px 8px 3px 0;
+  text-align: left;
+  border-bottom: 1px solid var(--vscode-panel-border);
+}
+
+/* ── Khối công cụ ─────────────────────────────────────────────────────────
+   Một bước trong luồng chạy: dòng trên là "định làm gì", dòng dưới là "làm
+   được gì". Cả hai nằm trong <summary> nên vẫn đọc được khi khối đóng — đọc
+   được mạch làm việc mà không phải mở từng khối là điểm chính của cách bày
+   này. */
+
+/* Không có viền trái riêng: rail của timeline đã là đường dọc duy nhất, và
+   trạng thái (đang chạy / xong / lỗi) nói bằng MÀU CỦA CHẤM. Hai đường dọc sát
+   nhau chỉ làm mắt phải chọn xem đường nào mới là mạch việc. */
+.tool {
+  margin-bottom: 8px;
+}
+
+.tool summary {
+  padding: 2px 0;
+  cursor: pointer;
+  list-style: none;
+}
+
+.tool summary::-webkit-details-marker {
+  display: none;
+}
+
+.tool-head {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+}
+
+.tool-dot {
+  flex: 0 0 auto;
+  font-size: 0.7em;
+  color: var(--vscode-descriptionForeground);
+}
+
+.tool.running > summary .tool-dot {
+  color: var(--vscode-charts-blue, var(--vscode-focusBorder));
+  animation: pulse 1.2s ease-in-out infinite;
+}
+
+.tool.done > summary .tool-dot {
+  color: var(--vscode-testing-iconPassed, var(--vscode-charts-green));
+}
+
+.tool.failed > summary .tool-dot {
+  color: var(--vscode-errorForeground);
+}
+
+.tool-name {
+  flex: 0 0 auto;
+  font-family: var(--vscode-editor-font-family);
+  font-weight: 600;
+}
+
+.tool-args {
+  flex: 1 1 auto;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--vscode-descriptionForeground);
+  font-family: var(--vscode-editor-font-family);
+  font-size: 0.9em;
+}
+
+.tool-time {
+  flex: 0 0 auto;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.85em;
+}
+
+.tool-result {
+  padding-left: 14px;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.88em;
+}
+
+.tool-result::before {
+  content: '⌞ ';
+}
+
+.tool-result.error {
+  color: var(--vscode-errorForeground);
+}
+
+.tool-output {
+  max-height: 300px;
+  margin: 6px 0 4px;
+  padding: 6px 8px;
+  overflow: auto;
+  border-radius: 3px;
+  background: var(--vscode-textCodeBlock-background);
+  font-family: var(--vscode-editor-font-family);
+  font-size: 0.9em;
+  white-space: pre-wrap;
+}
+
+/* ── Chỉ báo "đang làm gì" ─────────────────────────────────────────────────
+   Thứ lấp vào khoảng lặng giữa lúc gửi request và lúc token đầu tiên về. */
+
+.activity {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+  margin-bottom: 10px;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.9em;
+}
+
+.activity-spinner {
+  color: var(--vscode-charts-blue, var(--vscode-focusBorder));
+  animation: pulse 1.2s ease-in-out infinite;
+}
+
+.activity-time {
+  opacity: 0.75;
+  font-variant-numeric: tabular-nums;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.25; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .activity-spinner,
+  .tool.running > summary .tool-dot,
+  .tool.running::after,
+  .activity::after {
+    animation: none;
+  }
+}
+
+/* ── Cảnh báo và ghi chú ────────────────────────────────────────────────── */
+
+.warning {
+  margin-bottom: 12px;
+  padding: 8px 10px;
+  border-left: 3px solid var(--vscode-inputValidation-warningBorder);
+  background: var(--vscode-inputValidation-warningBackground);
+  border-radius: 2px;
+}
+
+.warning-body {
+  margin-top: 4px;
+  line-height: 1.45;
+}
+
+.warning-excerpt {
+  max-height: 120px;
+  margin: 6px 0 0;
+  padding: 6px 8px;
+  overflow: auto;
+  border-radius: 3px;
+  background: var(--vscode-textCodeBlock-background);
+  font-family: var(--vscode-editor-font-family);
+  font-size: 0.85em;
+  white-space: pre-wrap;
+}
+
+.note,
+.meta {
+  margin-bottom: 12px;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.88em;
+}
+
+.error-box {
+  margin-bottom: 12px;
+  padding: 8px 10px;
+  border-left: 3px solid var(--vscode-inputValidation-errorBorder);
+  background: var(--vscode-inputValidation-errorBackground);
+  border-radius: 2px;
+}
+
+/* ── Ô soạn ─────────────────────────────────────────────────────────────── */
+
+.composer {
+  flex: 0 0 auto;
+  position: relative;
+  padding: 8px 12px 12px;
+}
+
+/* ── Dự án và task đang làm ────────────────────────────────────────────────
+   Một hàng mảnh NGAY TRÊN ô nhập. Hai ô co giãn theo panel và cắt cụt bằng
+   ellipsis: tiêu đề task WBS dài hơn bề ngang panel là chuyện thường, và cho
+   nó đẩy hàng thành hai dòng sẽ ăn mất chỗ của ô nhập. */
+
+.workbar {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  margin-bottom: 6px;
+}
+
+/* Nhãn không co: "Project:" mà bị cắt thành "Proj…" thì thà bỏ hẳn còn hơn. Chỗ
+   phải nhường khi panel hẹp là tên dự án và tiêu đề task — chúng đã có ellipsis. */
+.work-label {
+  flex: 0 0 auto;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.8em;
+  white-space: nowrap;
+}
+
+.work-select {
+  flex: 1 1 0;
+  min-width: 0;
+  padding: 2px 4px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--vscode-descriptionForeground);
+  font-family: inherit;
+  font-size: 0.85em;
+  text-overflow: ellipsis;
+}
+
+/* Viền chỉ hiện khi rê chuột hoặc focus: lúc đứng yên đây là một dòng ngữ cảnh
+   để đọc, không phải hai điều khiển đòi được bấm. */
+.work-select:hover,
+.work-select:focus {
+  border-color: var(--vscode-input-border, var(--vscode-panel-border));
+  color: var(--vscode-foreground);
+  background: var(--vscode-input-background);
+}
+
+.work-note {
+  flex: 0 1 auto;
+  overflow: hidden;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.8em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.work-note.problem {
+  color: var(--vscode-errorForeground);
+}
+
+/* Lịch của task đang khai. `flex: 0 1 auto` như .work-note: khi panel hẹp thì
+   nó nhường chỗ cho hai ô chọn và tự cắt bằng ellipsis, chứ không đẩy nút
+   Report Done ra khỏi hàng — nút mất chỗ là nút không bấm được. */
+.work-plan {
+  flex: 0 1 auto;
+  overflow: hidden;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.8em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Quá hạn dùng màu cảnh báo, không dùng màu lỗi: task trễ là một sự thật của
+   dự án, không phải một thứ hỏng trong extension. Hai màu ấy mà lẫn nhau thì
+   người dùng đi tìm lỗi ở IDE. */
+.work-plan.late {
+  color: var(--vscode-editorWarning-foreground, var(--vscode-errorForeground));
+}
+
+.work-report {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  border: 1px solid var(--vscode-input-border, var(--vscode-panel-border));
+  border-radius: 4px;
+  background: transparent;
+  color: var(--vscode-descriptionForeground);
+  font-family: inherit;
+  font-size: 0.8em;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.work-report:hover,
+.work-report:focus-visible {
+  border-color: var(--vscode-focusBorder);
+  color: var(--vscode-foreground);
+}
+
+/* ── Hộp báo done ──────────────────────────────────────────────────────────
+   Dùng lại vỏ .modal; chỉ phần ruột là riêng. Mọi luật bó trong #reportForm
+   vì chat cũng dùng thẻ trần (input, label) cho nội dung model sinh ra. */
+
+.report-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.report-task {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+/* Nhãn và ô xếp thành hai cột: sáu dòng nhãn-trên-ô sẽ dài hơn cả panel, và
+   một hộp thoại phải cuộn để thấy nút Report là hộp thoại người ta bỏ dở. */
+.report-fields {
+  display: grid;
+  grid-template-columns: minmax(0, max-content) minmax(0, 1fr);
+  gap: 6px 10px;
+  align-items: center;
+}
+
+.report-label {
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.9em;
+  white-space: nowrap;
+}
+
+.report-input {
+  width: 100%;
+  min-width: 0;
+  padding: 3px 6px;
+  border: 1px solid var(--vscode-input-border, var(--vscode-panel-border));
+  border-radius: 4px;
+  background: var(--vscode-input-background);
+  color: var(--vscode-input-foreground);
+  font-family: inherit;
+  font-size: 0.9em;
+}
+
+.report-input:disabled {
+  opacity: 0.6;
+}
+
+/* Biểu tượng lịch của <input type="date"> mặc định là đen: trên nền tối của
+   VS Code nó biến mất hẳn, và người dùng tưởng ô ngày không bấm mở được. */
+.report-input::-webkit-calendar-picker-indicator {
+  filter: invert(var(--astra-date-icon-invert, 0));
+  cursor: pointer;
+}
+
+body.vscode-dark .report-input,
+body.vscode-high-contrast .report-input {
+  --astra-date-icon-invert: 1;
+}
+
+.report-hint {
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.85em;
+}
+
+.report-error {
+  color: var(--vscode-errorForeground);
+  font-size: 0.85em;
+  overflow-wrap: anywhere;
+}
+
+.report-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+/* Phần chọn là một khối flex lồng trong .workbar, KHÔNG phải các con trực tiếp
+   của nó: cả khối ẩn/hiện bằng một thuộc tính `hidden`, mà `.work-select` vẫn
+   cần một flex container ngay bên trên để `flex: 1 1 0` có nghĩa. */
+.work-pickers {
+  display: flex;
+  flex: 1 1 auto;
+  gap: 6px;
+  align-items: center;
+  min-width: 0;
+}
+
+/* ── Mẹo dùng ──────────────────────────────────────────────────────────────
+   Nút nằm cuối hàng dự án/task. `margin-left: auto` để nó dạt phải kể cả khi
+   phần chọn đang ẩn — lúc ấy hàng chỉ còn mỗi nó, và một nút lơ lửng bên trái
+   trông như thứ bị bỏ quên. */
+
+.tips-toggle {
+  flex: 0 0 auto;
+  margin-left: auto;
+  padding: 1px 6px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--vscode-descriptionForeground);
+  font-family: inherit;
+  font-size: 0.8em;
+  cursor: pointer;
+}
+
+.tips-toggle:hover,
+.tips-toggle:focus-visible {
+  border-color: var(--vscode-input-border, var(--vscode-panel-border));
+  color: var(--vscode-foreground);
+}
+
+/* Nền riêng để bảng tách khỏi ô nhập ngay dưới: hai khối chữ nhạt chồng nhau
+   không có ranh giới thì mắt đọc thành một. */
+.tips {
+  margin-bottom: 6px;
+  padding: 6px 8px;
+  border-radius: 4px;
+  background: var(--vscode-textCodeBlock-background);
+  font-size: 0.8em;
+}
+
+/* Cột phím canh theo lưới chứ không theo padding: `/compact <what to keep>` dài
+   gấp mấy lần `@`, và căn bằng khoảng trắng thì mỗi dòng lệch một kiểu. */
+.tip {
+  display: grid;
+  grid-template-columns: minmax(0, max-content) 1fr;
+  gap: 4px 10px;
+  padding: 1px 0;
+}
+
+.tip-key {
+  color: var(--vscode-textPreformat-foreground, var(--vscode-foreground));
+  font-family: var(--vscode-editor-font-family);
+  white-space: nowrap;
+}
+
+.tip-what {
+  color: var(--vscode-descriptionForeground);
+  min-width: 0;
+}
+
+/* Panel hẹp: cột phím tự xuống dòng riêng thay vì bóp cột mô tả còn hai chữ. */
+@media (max-width: 380px) {
+  .tip {
+    grid-template-columns: 1fr;
+    gap: 0;
+    padding: 2px 0;
+  }
+}
+
+/*
+ * Cả ô soạn là MỘT khối bo tròn, viền chỉ ở khối đó chứ không phải một đường
+ * kẻ ngang cắt ngang cửa sổ: khi panel hẹp, một hộp gọn nhìn ra ngay đâu là
+ * chỗ gõ, còn đường kẻ ngang thì không.
+ */
+.input-box {
+  padding: 6px 6px 6px 10px;
+  border: 1px solid var(--vscode-input-border, var(--vscode-panel-border));
+  border-radius: 12px;
+  background: var(--vscode-input-background);
+  transition: border-color 80ms linear;
+}
+
+.input-box:focus-within {
+  border-color: var(--vscode-focusBorder);
+}
+
+textarea {
+  display: block;
+  width: 100%;
+  max-height: 40vh;
+  padding: 4px 2px;
+  overflow-y: auto;
+  resize: none;
+  color: var(--vscode-input-foreground);
+  background: none;
+  border: none;
+  font-family: inherit;
+  font-size: inherit;
+  line-height: 1.5;
+}
+
+textarea:focus {
+  outline: none;
+}
+
+textarea::placeholder {
+  color: var(--vscode-input-placeholderForeground);
+}
+
+.composer-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 2px;
+}
+
+.composer-left,
+.composer-right {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+  min-width: 0;
+}
+
+button {
+  padding: 4px 12px;
+  color: var(--vscode-button-foreground);
+  background: var(--vscode-button-background);
+  border: none;
+  border-radius: 2px;
+  font-family: inherit;
+  font-size: inherit;
+  cursor: pointer;
+}
+
+button:hover:not(:disabled) {
+  background: var(--vscode-button-hoverBackground);
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+button.secondary {
+  color: var(--vscode-button-secondaryForeground);
+  background: var(--vscode-button-secondaryBackground);
+}
+
+/* Nút chỉ có icon trong hàng công cụ: nền trong suốt tới khi rê chuột. */
+.icon-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border-radius: 6px;
+  color: var(--vscode-foreground);
+  background: none;
+}
+
+.icon-btn:hover:not(:disabled) {
+  background: var(--vscode-toolbar-hoverBackground);
+}
+
+button.ghost {
+  padding: 3px 8px;
+  border-radius: 6px;
+  color: var(--vscode-descriptionForeground);
+  background: none;
+  font-size: 0.85em;
+}
+
+button.ghost:hover:not(:disabled) {
+  color: var(--vscode-foreground);
+  background: var(--vscode-toolbar-hoverBackground);
+}
+
+/* Nút gửi: hình tròn ở góc phải, đúng chỗ mắt tìm sau khi gõ xong. */
+button.round {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border-radius: 50%;
+}
+
+/* Cùng một nút đổi vai thành "dừng": nền dịu lại, icon đổi. Không đổi kích
+   thước hay vị trí — tay đã đưa tới đó rồi. */
+button.round.is-stop {
+  color: var(--vscode-button-secondaryForeground);
+  background: var(--vscode-button-secondaryBackground);
+}
+
+button.round .icon-stop,
+button.round.is-stop .icon-send {
+  display: none;
+}
+
+button.round.is-stop .icon-stop {
+  display: block;
+}
+
+button.link {
+  margin-top: 6px;
+  padding: 0;
+  color: var(--vscode-textLink-foreground);
+  background: none;
+  text-decoration: underline;
+}
+
+/* ── Chip ảnh đính kèm ──────────────────────────────────────────────────── */
+
+.attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 2px 0 6px;
+}
+
+.chip {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  max-width: 220px;
+  padding: 3px 4px 3px 3px;
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 8px;
+  background: var(--vscode-editorWidget-background);
+  font-size: 0.85em;
+}
+
+.chip-thumb {
+  width: 26px;
+  height: 26px;
+  border-radius: 5px;
+  object-fit: cover;
+}
+
+.chip-name {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.chip-remove {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border-radius: 4px;
+  color: var(--vscode-descriptionForeground);
+  background: none;
+  line-height: 1;
+}
+
+.chip-remove:hover:not(:disabled) {
+  color: var(--vscode-foreground);
+  background: var(--vscode-toolbar-hoverBackground);
+}
+
+/* ── Chip pin (tính năng ghim) ──────────────────────────────────────────── */
+/* Lớp riêng, không dùng lại `.chip`: pin không có ảnh thu nhỏ, có max-width
+   nhưng cần thêm trạng thái lỗi (denylist chặn, file đã xoá) mà ảnh đính kèm
+   không có. */
+
+.pins {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 2px 0 6px;
+}
+
+.pin-chip {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  max-width: 260px;
+  padding: 3px 4px 3px 8px;
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 8px;
+  background: var(--vscode-editorWidget-background);
+  font-family: var(--vscode-editor-font-family);
+  font-size: 0.85em;
+}
+
+.pin-chip-error {
+  border-color: var(--vscode-inputValidation-errorBorder, var(--vscode-errorForeground));
+  color: var(--vscode-inputValidation-errorForeground, var(--vscode-errorForeground));
+}
+
+/* ── Gợi ý pin khi bôi đen trong editor ──────────────────────────────────── */
+/* Viền màu accent để khác `.pin-chip`: đây là một LỰA CHỌN chưa quyết định,
+   không phải một pin đã có, nên phải nổi hơn thay vì trộn vào hàng chip. */
+
+.selection-hint {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 2px 0 6px;
+  padding: 4px 4px 4px 10px;
+  border: 1px solid var(--vscode-focusBorder);
+  border-radius: 8px;
+  background: var(--vscode-editorWidget-background);
+  font-size: 0.85em;
+}
+
+/* `.selection-hint { display: flex }` ở trên có độ ưu tiên NGANG `[hidden]` mặc
+   định của trình duyệt — luật author luôn thắng luật user-agent dù ngang độ ưu
+   tiên, nên thiếu dòng này thì hộp vẫn hiện (rỗng, chỉ còn viền) kể cả khi đã
+   gắn `hidden`. Cùng cách `.mode-menu[hidden]`/`.modal[hidden]` đã làm bên dưới. */
+.selection-hint[hidden] {
+  display: none;
+}
+
+.selection-hint-label {
+  flex: 1 1 auto;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-family: var(--vscode-editor-font-family);
+}
+
+.selection-hint-pin {
+  flex: 0 0 auto;
+  padding: 2px 10px;
+  border-radius: 6px;
+  background: var(--vscode-button-background);
+  color: var(--vscode-button-foreground);
+}
+
+.selection-hint-pin:hover {
+  background: var(--vscode-button-hoverBackground);
+}
+
+.selection-hint-dismiss {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border-radius: 4px;
+  color: var(--vscode-descriptionForeground);
+  background: none;
+  line-height: 1;
+}
+
+.selection-hint-dismiss:hover {
+  color: var(--vscode-foreground);
+  background: var(--vscode-toolbar-hoverBackground);
+}
+
+/* Ảnh đã gửi, hiện lại trong bong bóng của người dùng. */
+.msg-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.msg-images img {
+  max-width: 180px;
+  max-height: 140px;
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 6px;
+}
+
+/* Pin đã gửi, hiện lại trong bong bóng của người dùng — cùng ý tưởng với
+   `.msg-images`: pin một-lần-mỗi-lượt, nên đây là nơi DUY NHẤT còn thấy nó sau
+   khi gửi (composer đã xoá, xem `ChatController.send`). Chỉ đọc, không có nút
+   bỏ ghim: lượt đã gửi rồi thì không sửa lại được nữa. */
+.msg-pins {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.msg-pin-chip {
+  padding: 2px 8px;
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 8px;
+  background: var(--vscode-editorWidget-background);
+  font-family: var(--vscode-editor-font-family);
+  font-size: 0.85em;
+}
+
+/* ── Gợi ý @mention ─────────────────────────────────────────────────────── */
+
+.mentions {
+  position: absolute;
+  right: 12px;
+  bottom: 100%;
+  left: 12px;
+  z-index: 10;
+  max-height: 220px;
+  overflow-y: auto;
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 4px;
+  background: var(--vscode-editorWidget-background);
+  box-shadow: 0 2px 8px rgb(0 0 0 / 25%);
+}
+
+.mention {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  padding: 4px 10px;
+  cursor: pointer;
+}
+
+.mention.active,
+.mention:hover {
+  background: var(--vscode-list-activeSelectionBackground);
+  color: var(--vscode-list-activeSelectionForeground);
+}
+
+.mention-name {
+  font-weight: 600;
+}
+
+.mention-path {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.88em;
+}
+
+/* ── Duyệt quyền (M4) ─────────────────────────────────────────────────────
+   Hộp này phải NỔI BẬT hơn mọi thứ khác trong luồng chat. Nó là chỗ duy nhất
+   người dùng ngăn được agent sửa nhầm, nên nó không được trông giống một dòng
+   thông báo để lướt qua. */
+
+.permission {
+  margin: 10px 0;
+  padding: 10px 12px;
+  border: 1px solid var(--vscode-inputValidation-warningBorder, var(--vscode-focusBorder));
+  border-left-width: 3px;
+  border-radius: 4px;
+  background: var(--vscode-editorWidget-background);
+}
+
+.permission-head {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  flex-wrap: wrap;
+}
+
+.permission-tool {
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: var(--vscode-badge-background);
+  color: var(--vscode-badge-foreground);
+  font-family: var(--vscode-editor-font-family);
+  font-size: 0.85em;
+}
+
+.permission-summary {
+  font-weight: 600;
+}
+
+.permission-downgrade {
+  margin-top: 6px;
+  color: var(--vscode-inputValidation-warningForeground, var(--vscode-editorWarning-foreground));
+  font-size: 0.9em;
+}
+
+/* ── Cảnh báo trong hộp duyệt ──────────────────────────────────────────────
+   Chỉ xuất hiện khi thao tác thật sự với ra ngoài workspace, nên nó được phép
+   nổi bật: viền trái đỏ, nền lỗi nhạt. Đây là thứ thay chân cho dòng "NO
+   isolation" treo thường trực ngày trước — hiếm nên đọc được, thay vì luôn bật
+   nên bị bỏ qua. */
+
+.permission-risky {
+  border-color: var(--vscode-inputValidation-errorBorder, var(--vscode-errorForeground));
+}
+
+.permission-warnings {
+  margin-top: 8px;
+  padding: 6px 8px;
+  border-left: 3px solid var(--vscode-inputValidation-errorBorder, var(--vscode-errorForeground));
+  border-radius: 3px;
+  background: var(--vscode-inputValidation-errorBackground, transparent);
+  font-size: 0.9em;
+}
+
+.permission-warning-title {
+  font-weight: 600;
+}
+
+/* Bằng chứng là chữ trong chính lệnh của model: giữ nó ở font mã để `~/.ssh`
+   không bị font tỉ lệ làm cho trông giống văn xuôi. */
+.permission-warning-list {
+  margin: 4px 0 0;
+  padding-left: 18px;
+  font-family: var(--vscode-editor-font-family);
+  line-height: 1.5;
+  word-break: break-all;
+}
+
+.permission-preview {
+  max-height: 320px;
+  margin: 8px 0 0;
+  padding: 8px;
+  overflow: auto;
+  border-radius: 3px;
+  background: var(--vscode-textCodeBlock-background);
+  font-family: var(--vscode-editor-font-family);
+  font-size: 0.85em;
+  white-space: pre;
+  tab-size: 2;
+}
+
+/* ── Diff trong hộp duyệt quyền ────────────────────────────────────────────
+   Đây là chỗ người dùng quyết định có cho agent sửa file hay không, nên nó
+   phải đọc lướt được. Màu lấy từ biến diff của chính VS Code, không đặt mã màu
+   cứng: hộp này phải hợp với theme người dùng đang dùng, kể cả theme tương
+   phản cao — và ở đó một mã màu cứng có thể thành chữ vô hình.
+
+   Nền là tín hiệu chính, chữ chỉ đổi nhẹ: tô cả dòng bằng màu chữ rực làm mất
+   syntax và khiến mắt mỏi trên một diff dài. */
+
+.permission-preview.is-diff {
+  /* Padding chuyển xuống từng dòng để dải nền chạy hết chiều ngang. */
+  padding: 6px 0;
+}
+
+/* `min-width: 100%` + `fit-content`: khối này cuộn ngang được, và một `display:
+   block` thường chỉ rộng bằng khung nhìn — dải nền sẽ đứt ngay mép phải ngay
+   khi diff có một dòng dài. Với dòng dài thì nền phải chạy hết dòng. */
+.diff-line {
+  display: block;
+  width: fit-content;
+  min-width: 100%;
+  padding: 0 8px;
+}
+
+/* `insertedLineBackground` chứ không phải `insertedTextBackground`: cái sau
+   dành cho các KÝ TỰ đổi bên trong một dòng và đậm hơn hẳn — dùng nó để tô cả
+   dòng thì diff nào cũng trông như bị bôi highlight. Vẫn để cái đó làm dự
+   phòng cho theme cũ chưa khai biến line. */
+.diff-add {
+  background: var(
+    --vscode-diffEditor-insertedLineBackground,
+    var(--vscode-diffEditor-insertedTextBackground, rgba(80, 200, 120, 0.14))
+  );
+}
+
+.diff-del {
+  background: var(
+    --vscode-diffEditor-removedLineBackground,
+    var(--vscode-diffEditor-removedTextBackground, rgba(230, 90, 90, 0.14))
+  );
+}
+
+/* Dòng ngữ cảnh giữ nguyên nền — nó là phần nhiều nhất của mọi diff, tô vào
+   là biến cái nền thành nhiễu. */
+.diff-ctx {
+  color: var(--vscode-foreground);
+  opacity: 0.75;
+}
+
+.diff-meta {
+  display: block;
+  width: fit-content;
+  min-width: 100%;
+  padding: 0 8px;
+  color: var(--vscode-descriptionForeground);
+}
+
+/* Máng dấu + số dòng: làm nhạt để mắt bám vào code, nhưng VẪN cho bôi đen.
+   Cắt nó khỏi vùng chọn thì copy cả khối ra sẽ được các dòng cũ và mới trộn
+   vào nhau mà không còn dấu nào phân biệt — im lặng biến một diff thành một
+   đoạn code sai. */
+.diff-gutter {
+  opacity: 0.55;
+}
+
+.diff-add .diff-text {
+  color: var(--vscode-gitDecoration-addedResourceForeground, var(--vscode-foreground));
+}
+
+.diff-del .diff-text {
+  color: var(--vscode-gitDecoration-deletedResourceForeground, var(--vscode-foreground));
+}
+
+/* ── Split diff trong output tool ─────────────────────────────────────────
+   Hai cột: trái = bản cũ, phải = bản mới. Dòng thêm → cột trái trống; dòng xoá
+   → cột phải trống; dòng giữ → cả hai. Màu tái sử dụng biến diff của VS Code,
+   giống `.diff-add`/`.diff-del` ở trên. */
+
+.split-diff {
+  display: flex;
+  flex-direction: column;
+  font-family: var(--vscode-editor-font-family);
+  font-size: 0.9em;
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.split-diff-row {
+  display: flex;
+}
+
+/* Ô đổi màu co giãn đều; flex: 1 giữ hai cột bằng nhau cho mọi độ rộng. */
+.split-diff-cell {
+  flex: 1;
+  white-space: pre-wrap;
+  word-break: break-word;
+  padding: 0 6px;
+  min-height: 1.4em;
+  line-height: 1.4;
+}
+
+/* Ô trống = hàng thêm/xoá ở cột bên kia. Nền nhạt để mắt biết ô đó "không có
+   gì" là cố ý, không phải lỗi vẽ. */
+.split-diff-empty {
+  background: var(--vscode-editor-inactiveSelectionBackground, rgba(128, 128, 128, 0.06));
+}
+
+/* Đường phân cách giữa hai cột. */
+.split-diff-row .split-diff-left {
+  border-right: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.2));
+}
+
+.split-diff-meta {
+  padding: 2px 6px;
+  color: var(--vscode-descriptionForeground);
+  font-style: italic;
+}
+
+.permission-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.permission-actions button.primary {
+  background: var(--vscode-button-background);
+  color: var(--vscode-button-foreground);
+}
+
+.permission-result {
+  margin-top: 8px;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.9em;
+}
+
+.permission-allowed { border-left-color: var(--vscode-gitDecoration-addedResourceForeground); }
+.permission-denied  { border-left-color: var(--vscode-gitDecoration-deletedResourceForeground); }
+
+/* ── Hỏi người dùng qua nút bấm (ask_user_question) ──────────────────────── */
+
+.question {
+  margin: 10px 0;
+  padding: 10px 12px;
+  border: 1px solid var(--vscode-focusBorder);
+  border-left-width: 3px;
+  border-radius: 4px;
+  background: var(--vscode-editorWidget-background);
+}
+
+.question-block + .question-block {
+  margin-top: 12px;
+}
+
+.question-title {
+  font-weight: 600;
+}
+
+.question-text {
+  margin-top: 2px;
+  color: var(--vscode-descriptionForeground);
+}
+
+.question-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.question-option {
+  background: var(--vscode-button-secondaryBackground);
+  color: var(--vscode-button-secondaryForeground);
+}
+
+.question-option.selected {
+  background: var(--vscode-button-background);
+  color: var(--vscode-button-foreground);
+}
+
+.question-actions {
+  display: flex;
+  margin-top: 10px;
+}
+
+.question-result {
+  margin-top: 8px;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.9em;
+}
+
+.question-answered  { border-left-color: var(--vscode-gitDecoration-addedResourceForeground); }
+.question-cancelled { border-left-color: var(--vscode-gitDecoration-deletedResourceForeground); }
+
+/* ── Cảnh báo hạ cấp quyền / sandbox không cách ly ───────────────────────── */
+
+.downgrade {
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--vscode-panel-border);
+  background: var(--vscode-inputValidation-warningBackground, transparent);
+  color: var(--vscode-inputValidation-warningForeground, var(--vscode-editorWarning-foreground));
+  font-size: 0.9em;
+}
+
+/* ── Checklist tiến độ (M5) ──────────────────────────────────────────────── */
+
+.todos {
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--vscode-panel-border);
+  font-size: 0.9em;
+}
+
+.todo-head {
+  margin-bottom: 4px;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.9em;
+}
+
+.todo-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.todo {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+  padding: 1px 0;
+}
+
+.todo-mark {
+  width: 1em;
+  color: var(--vscode-descriptionForeground);
+}
+
+.todo-completed .todo-text {
+  color: var(--vscode-descriptionForeground);
+  text-decoration: line-through;
+}
+
+.todo-in_progress .todo-mark { color: var(--vscode-charts-blue, var(--vscode-focusBorder)); }
+.todo-in_progress .todo-text { font-weight: 600; }
+
+/* ── Đồng hồ ngữ cảnh (M6) ────────────────────────────────────────────────
+   Chỉ hiện từ 70% trở lên. Một con số nhấp nháy suốt phiên sẽ bị bỏ qua đúng
+   vào lúc nó bắt đầu quan trọng. */
+
+.context {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 4px 12px;
+  border-bottom: 1px solid var(--vscode-panel-border);
+  font-size: 0.85em;
+  color: var(--vscode-descriptionForeground);
+}
+
+.context-bar {
+  flex: 0 0 60px;
+  height: 4px;
+  overflow: hidden;
+  border-radius: 2px;
+  background: var(--vscode-panel-border);
+}
+
+.context-fill {
+  height: 100%;
+  background: var(--vscode-charts-yellow, var(--vscode-editorWarning-foreground));
+}
+
+.context.compact .context-fill {
+  background: var(--vscode-errorForeground);
+}
+
+.context-label {
+  flex: 1 1 auto;
+}
+
+/* ── Bảng hội thoại cũ (M6) ──────────────────────────────────────────────── */
+
+/* Phủ kín panel: nền phải ĐẶC, không trong suốt — đọc tiêu đề hội thoại cũ
+   chồng lên chữ của hội thoại đang mở thì không đọc được cái nào. */
+/* Bảng hội thoại cũ dùng chung vỏ `.modal` với bảng cài đặt — xem cuối file.
+   Chỉ còn hai mảnh riêng: danh sách cuộn được, và chân bảng giữ nút "New chat".
+
+   `min-height: 0` là bắt buộc, không phải để cho đẹp: mặc định một flex item
+   không co nhỏ hơn nội dung của nó, nên hai mươi hội thoại sẽ kéo dài cái hộp
+   thay vì cuộn trong nó, và nút "New chat" bị đẩy khỏi khung nhìn. */
+.history-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 10px 12px;
+}
+
+.history-foot {
+  flex: 0 0 auto;
+  padding: 8px 12px;
+  border-top: 1px solid var(--vscode-panel-border);
+}
+
+.session {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  margin-bottom: 4px;
+  padding: 5px 9px;
+  text-align: left;
+  color: var(--vscode-foreground);
+  background: var(--vscode-editorWidget-background);
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 4px;
+}
+
+.session:hover:not(:disabled) {
+  background: var(--vscode-list-hoverBackground);
+}
+
+.session.active {
+  border-color: var(--vscode-focusBorder);
+}
+
+.session-title {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.session-meta {
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.85em;
+}
+
+/* Nhãn nguồn trong gợi ý lệnh — lệnh của repo là prompt do người khác viết. */
+.mention-tag {
+  flex: 0 0 auto;
+  padding: 0 5px;
+  border-radius: 3px;
+  background: var(--vscode-badge-background);
+  color: var(--vscode-badge-foreground);
+  font-size: 0.8em;
+}
+
+/* ── Chọn chế độ quyền trong thanh soạn ───────────────────────────────────
+   Nút gọn trong hàng công cụ, bảng bật lên PHÍA TRÊN nó: thanh soạn nằm sát
+   đáy panel, nên một bảng đổ xuống sẽ rơi ra ngoài khung nhìn.
+
+   Bảng neo theo .mode-picker (position: relative) chứ không theo .composer:
+   nó phải bám mép phải của nút, còn hộp gợi ý @mention thì trải hết chiều
+   ngang — hai thứ khác nhau, hai mốc neo khác nhau. */
+
+.mode-picker {
+  position: relative;
+  display: flex;
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+.mode-btn {
+  display: flex;
+  gap: 5px;
+  align-items: center;
+  min-width: 0;
+  padding: 3px 8px;
+  border-radius: 6px;
+  color: var(--vscode-descriptionForeground);
+  background: none;
+  font-size: 0.85em;
+  white-space: nowrap;
+}
+
+.mode-btn:hover:not(:disabled),
+.mode-btn[aria-expanded='true'] {
+  color: var(--vscode-foreground);
+  background: var(--vscode-toolbar-hoverBackground);
+}
+
+.mode-btn-icon {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+}
+
+.mode-btn-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.mode-menu {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 6px);
+  /* Trên hộp gợi ý @mention (10), nhưng DƯỚI các lớp phủ hội thoại cũ / cài đặt
+     / cửa đăng nhập (20+): một menu nổi trên lớp phủ là menu không đóng được. */
+  z-index: 15;
+  width: max-content;
+  max-width: min(320px, calc(100vw - 32px));
+  padding: 4px;
+  border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
+  border-radius: 8px;
+  background: var(--vscode-editorWidget-background, var(--vscode-menu-background));
+  box-shadow: 0 4px 14px rgb(0 0 0 / 32%);
+}
+
+.mode-menu[hidden] {
+  display: none;
+}
+
+.mode-menu-head {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 5px 8px 6px;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.85em;
+}
+
+/* Ghi chú ở đầu bảng chọn model: "this conversation only". Nó là điều DUY NHẤT
+   phân biệt bảng này với bảng chế độ bên cạnh, nên nó phải đọc được ngay chứ
+   không nằm trong tooltip. */
+.mode-menu-note {
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.9em;
+  font-style: italic;
+}
+
+/* Vạch ngăn giữa danh sách model và hai đường "quay về mặc định". Hai nhóm đó
+   khác nhau về hệ quả — một cái đổi phiên này, một cái ghi vào settings — nên
+   chúng không được trông như cùng một danh sách. */
+.mode-menu-sep {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--vscode-widget-border, var(--vscode-panel-border));
+}
+
+/* Danh sách model dài hơn ba chế độ cố định, nên bảng phải cuộn được thay vì
+   tràn ra ngoài khung nhìn. */
+.model-menu {
+  max-height: min(420px, 60vh);
+  overflow-y: auto;
+}
+
+/* Tên model dài hơn nhãn chế độ nhiều. Cho nút co lại trước khi hàng công cụ bị
+   đẩy tràn — nhãn đã có text-overflow: ellipsis ở .mode-btn-label. */
+.model-picker {
+  flex-shrink: 1;
+  min-width: 0;
+  max-width: 42%;
+}
+
+.mode-option:disabled {
+  opacity: 0.55;
+}
+
+.mode-kbd kbd {
+  padding: 0 4px;
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 3px;
+  background: var(--vscode-keybindingLabel-background, transparent);
+  color: var(--vscode-keybindingLabel-foreground, inherit);
+  font-family: inherit;
+  font-size: 0.9em;
+}
+
+.mode-option {
+  display: flex;
+  gap: 9px;
+  align-items: flex-start;
+  width: 100%;
+  padding: 7px 8px;
+  border-radius: 6px;
+  color: var(--vscode-foreground);
+  background: none;
+  text-align: left;
+}
+
+.mode-option:hover:not(:disabled) {
+  background: var(--vscode-list-hoverBackground);
+}
+
+/* Dòng đang chọn: nền nhạt + dấu tick. Chỉ dấu tick thôi thì ở panel hẹp mắt
+   phải quét sang tận mép phải mới biết mình đang ở chế độ nào. */
+.mode-option.selected {
+  background: var(--vscode-list-inactiveSelectionBackground, var(--vscode-list-hoverBackground));
+}
+
+.mode-option-icon {
+  display: flex;
+  flex: 0 0 auto;
+  padding-top: 1px;
+  color: var(--vscode-descriptionForeground);
+}
+
+.mode-option.selected .mode-option-icon {
+  color: var(--vscode-textLink-foreground, var(--vscode-focusBorder));
+}
+
+.mode-option-text {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.mode-option-title {
+  font-weight: 600;
+}
+
+.mode-option-desc {
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.85em;
+  line-height: 1.35;
+}
+
+.mode-option-check {
+  display: flex;
+  flex: 0 0 14px;
+  padding-top: 2px;
+  color: var(--vscode-textLink-foreground, var(--vscode-focusBorder));
+}
+
+/* ── Popup cài đặt (v6) ──────────────────────────────────────────────────── */
+
+/* Hộp thoại nổi, KHÔNG phải lớp phủ kín như bảng hội thoại cũ: đổi model là
+   ghé qua rồi quay lại câu đang hỏi, nên hội thoại phải còn nhìn thấy sau lớp
+   mờ. Hộp neo theo panel (position: absolute, không phải fixed) vì webview này
+   có khi rộng bằng editor, có khi hẹp bằng sidebar. */
+.modal {
+  position: absolute;
+  inset: 0;
+  /* Trên cửa đăng nhập (30): khi chưa cấu hình gateway thì bảng cài đặt là thứ
+     DUY NHẤT còn dùng được, nằm dưới cửa thì bấm "Open settings" chẳng thấy gì. */
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+}
+
+.modal[hidden] {
+  display: none;
+}
+
+/* Lớp mờ là <button> để bấm-ra-ngoài đến được bằng bàn phím — nên phải gỡ hết
+   dáng nút, kể cả nền lúc rê chuột: luật `button:hover` toàn cục sẽ nhuộm cả
+   lớp mờ thành màu nút khi con trỏ đi ngang qua hội thoại phía sau. */
+.modal-scrim {
+  position: absolute;
+  inset: 0;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: rgb(0 0 0 / 45%);
+  cursor: default;
+}
+
+.modal-scrim:hover:not(:disabled) {
+  background: rgb(0 0 0 / 45%);
+}
+
+.modal-box {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  max-width: 420px;
+  /* Cao tối đa theo panel, không theo nội dung: bảng model dài bao nhiêu cũng
+     không được đẩy nút Close ra khỏi khung nhìn. */
+  max-height: 100%;
+  overflow: hidden;
+  border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
+  border-radius: 10px;
+  background: var(--vscode-editorWidget-background, var(--vscode-sideBar-background));
+  box-shadow: 0 10px 32px rgb(0 0 0 / 40%);
+}
+
+.modal-head {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 10px 10px 14px;
+  border-bottom: 1px solid var(--vscode-panel-border);
+}
+
+.modal-title {
+  font-weight: 600;
+}
+
+.modal-body {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: 14px;
+}
+
+/* Mọi luật dưới đây phải bó trong #settingsBody. Bảng cài đặt dùng thẻ trần
+   (h2, p, table, input) mà chat cũng dùng cho nội dung model sinh ra — thả ra
+   ngoài là chúng đè lên nhau ở chỗ không ai ngờ. */
+
+body.busy {
+  opacity: 0.6;
+  pointer-events: none;
+}
+
+/* Nhóm: tiêu đề nhỏ viết hoa + nút hành động cùng hàng, rồi tới nội dung. */
+#settingsBody .group + .group {
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid var(--vscode-panel-border);
+}
+
+#settingsBody .group-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+#settingsBody h2 {
+  margin: 0;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--vscode-descriptionForeground);
+}
+
+/* Nút chữ của hàng tiêu đề — "Refresh", "Updated 10:42". Không viền, không nền:
+   nó là hành động phụ, cạnh một nhãn đã cố tình mờ. */
+#settingsBody .link-btn {
+  flex: 0 0 auto;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--vscode-textLink-foreground);
+  font-size: 0.85em;
+}
+
+#settingsBody .link-btn:hover:not(:disabled) {
+  /* `background: none` phải lặp lại ở đây: luật `button:hover` toàn cục đặt nền
+     màu nút, và nó vẫn áp cho nút chữ nếu chỗ này không nói ngược lại. */
+  background: none;
+  color: var(--vscode-textLink-activeForeground, var(--vscode-textLink-foreground));
+  text-decoration: underline;
+}
+
+/* Hàng: chữ trái, điều khiển phải. Chữ co lại trước — nút "Sign out" mà xuống
+   dòng hoặc bị cắt thì không còn là nút nữa. */
+#settingsBody .row {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  justify-content: space-between;
+}
+
+#settingsBody .row + .row {
+  margin-top: 10px;
+}
+
+#settingsBody .row-text {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+#settingsBody .row-title {
+  overflow: hidden;
+  font-weight: 600;
+  text-overflow: ellipsis;
+}
+
+#settingsBody .row-desc {
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.85em;
+  line-height: 1.4;
+}
+
+#settingsBody .row > button,
+#settingsBody .row > .switch {
+  flex: 0 0 auto;
+}
+
+/* Công tắc thật thay cho ô tick: một hàng có nhãn bên trái thì cái gạt bên phải
+   đọc ra ngay là bật/tắt, còn ô tick trần đọc ra là "đã chọn mục này". */
+#settingsBody .switch {
+  position: relative;
+  display: inline-flex;
+  cursor: pointer;
+}
+
+#settingsBody .switch input {
+  position: absolute;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+#settingsBody .switch-track {
+  display: block;
+  width: 30px;
+  height: 17px;
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 999px;
+  background: var(--vscode-input-background);
+  transition: background 0.12s ease;
+}
+
+#settingsBody .switch-track::after {
+  content: '';
+  display: block;
+  width: 11px;
+  height: 11px;
+  margin: 2px;
+  border-radius: 50%;
+  background: var(--vscode-descriptionForeground);
+  transition: transform 0.12s ease, background 0.12s ease;
+}
+
+#settingsBody .switch input:checked + .switch-track {
+  border-color: var(--vscode-focusBorder);
+  background: var(--vscode-button-background);
+}
+
+#settingsBody .switch input:checked + .switch-track::after {
+  transform: translateX(13px);
+  background: var(--vscode-button-foreground);
+}
+
+#settingsBody .switch input:focus-visible + .switch-track {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: 1px;
+}
+
+#settingsBody .field + .field {
+  margin-top: 12px;
+}
+
+#settingsBody .field label {
+  display: block;
+  font-weight: 600;
+}
+
+#settingsBody .field .hint {
+  margin: 2px 0 5px;
+  font-size: 0.85em;
+}
+
+#settingsBody .field select + .hint {
+  margin: 4px 0 0;
+}
+
+/* Bảng năng lực gấp lại — xem renderModelDetails(). */
+#settingsBody .disclosure {
+  margin-top: 14px;
+}
+
+#settingsBody .disclosure > summary {
+  color: var(--vscode-descriptionForeground);
+  cursor: pointer;
+  font-size: 0.85em;
+  list-style: none;
+}
+
+#settingsBody .disclosure > summary::-webkit-details-marker {
+  display: none;
+}
+
+#settingsBody .disclosure > summary::before {
+  content: '▸ ';
+}
+
+#settingsBody .disclosure[open] > summary::before {
+  content: '▾ ';
+}
+
+#settingsBody .disclosure > summary:hover {
+  color: var(--vscode-foreground);
+}
+
+#settingsBody input[type='text'],
+#settingsBody select {
+  width: 100%;
+  padding: 4px 6px;
+  color: var(--vscode-input-foreground);
+  background: var(--vscode-input-background);
+  border: 1px solid var(--vscode-input-border, transparent);
+  border-radius: 2px;
+  font-family: inherit;
+  font-size: inherit;
+}
+
+#settingsBody input[type='text']:focus,
+#settingsBody select:focus {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: -1px;
+}
+
+#settingsBody p,
+#settingsBody .hint {
+  margin: 4px 0 0;
+  color: var(--vscode-descriptionForeground);
+  line-height: 1.45;
+}
+
+#settingsBody .problem {
+  margin-top: 10px;
+  padding: 8px 10px;
+  border-left: 3px solid var(--vscode-inputValidation-errorBorder);
+  border-radius: 2px;
+  background: var(--vscode-inputValidation-errorBackground);
+  color: var(--vscode-inputValidation-errorForeground, var(--vscode-foreground));
+}
+
+/* Tên agent chung của dự án. Lớp riêng chứ không dùng lại `.chip` của ô đính
+   kèm: cái kia có max-width và chừa chỗ cho ảnh thu nhỏ. */
+#settingsBody .agent-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+#settingsBody .agent-chip {
+  padding: 2px 8px;
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 10px;
+  background: var(--vscode-editorWidget-background);
+  font-family: var(--vscode-editor-font-family);
+  font-size: 0.85em;
+}
+
+/* Bảng rộng cuộn trong khung của nó, không đẩy cả popup cuộn ngang. */
+#settingsBody .table-scroll {
+  overflow-x: auto;
+  margin-top: 8px;
+}
+
+#settingsBody table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.95em;
+}
+
+#settingsBody th,
+#settingsBody td {
+  padding: 4px 8px 4px 0;
+  text-align: left;
+  white-space: nowrap;
+  border-bottom: 1px solid var(--vscode-panel-border);
+}
+
+#settingsBody th {
+  color: var(--vscode-descriptionForeground);
+  font-weight: 600;
+}
+
+#settingsBody tr.dim td {
+  opacity: 0.55;
+}
+
+#settingsBody td.ok {
+  color: var(--vscode-testing-iconPassed, var(--vscode-charts-green));
+}
+
+#settingsBody td.warn {
+  color: var(--vscode-editorWarning-foreground, var(--vscode-charts-yellow));
+}
+
+/* Ba ô số của mục "Mức dùng". */
+#settingsBody .stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+#settingsBody .stat {
+  display: flex;
+  flex: 1 1 90px;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  background: var(--vscode-editorWidget-background);
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 4px;
+}
+
+#settingsBody .stat-value {
+  font-size: 1.15em;
+  font-weight: 600;
+}
+
+#settingsBody .stat-label {
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.85em;
+}
+
+/* Thanh ngữ cảnh của hội thoại đang mở. Nằm dưới ba ô số nhưng KHÔNG cùng loại
+   với chúng: ba ô kia là tổng của tài khoản, thanh này là chỗ còn lại trong
+   lượt đang chạy — nên nó có hình dạng khác hẳn để mắt không gộp chúng lại. */
+#settingsBody .meter {
+  margin-top: 12px;
+}
+
+#settingsBody .meter-head {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 5px;
+  font-size: 0.85em;
+}
+
+#settingsBody .meter-value {
+  flex: 0 0 auto;
+  color: var(--vscode-descriptionForeground);
+}
+
+#settingsBody .meter-bar {
+  height: 4px;
+  overflow: hidden;
+  border-radius: 2px;
+  background: var(--vscode-panel-border);
+}
+
+#settingsBody .meter-fill {
+  height: 100%;
+  background: var(--vscode-progressBar-background, var(--vscode-focusBorder));
+}
+
+/* Thanh tiền đổi màu khi gần cạn. Cùng hai ngưỡng với đồng hồ ngữ cảnh ở khung
+   chat (70% / 90%): hai thanh trong cùng một sản phẩm mà mỗi thanh một bảng màu
+   thì màu thôi không còn nói được điều gì. */
+#settingsBody .meter.warn .meter-fill {
+  background: var(--vscode-charts-yellow, var(--vscode-editorWarning-foreground));
+}
+
+#settingsBody .meter.high .meter-fill {
+  background: var(--vscode-charts-red, var(--vscode-errorForeground));
+}
+
+/* Bảy dòng "System prompt / System tools / MCP tools / Memory / Skills /
+   Messages / Free" ngay dưới thanh Context — mỗi dòng giải thích một phần
+   của chính con số ở thanh đó, nên khoảng cách với thanh mẹ hẹp hơn khoảng
+   cách giữa hai nhóm .meter khác nhau. */
+#settingsBody .breakdown {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+#settingsBody .breakdown-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.85em;
+}
+
+#settingsBody .breakdown-dot {
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+}
+
+#settingsBody .breakdown-label {
+  flex: 0 0 96px;
+  color: var(--vscode-descriptionForeground);
+}
+
+#settingsBody .breakdown-bar {
+  flex: 1 1 auto;
+  height: 4px;
+  overflow: hidden;
+  border-radius: 2px;
+  background: var(--vscode-panel-border);
+}
+
+#settingsBody .breakdown-fill {
+  height: 100%;
+}
+
+#settingsBody .breakdown-value {
+  flex: 0 0 44px;
+  text-align: right;
+  color: var(--vscode-descriptionForeground);
+}
+
+#settingsBody .breakdown-cache-line {
+  margin-top: 4px;
+  font-size: 0.8em;
+  color: var(--vscode-descriptionForeground);
+}
+
+/* ── Cửa đăng nhập ───────────────────────────────────────────────────────── */
+
+.gate {
+  position: absolute;
+  inset: 0;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: var(--vscode-sideBar-background);
+}
+
+.gate[hidden] {
+  display: none;
+}
+
+.gate-box {
+  display: flex;
+  max-width: 340px;
+  flex-direction: column;
+  gap: 10px;
+  text-align: center;
+}
+
+.gate-title {
+  font-size: 1.1em;
+  font-weight: 600;
+}
+
+.gate-text {
+  color: var(--vscode-descriptionForeground);
+  line-height: 1.5;
+}
+
+/* Một lần gọi tool trong phiên cũ.
+   Dùng chung .tool-head/.tool-name/.tool-args/.tool-result với lúc chạy thật —
+   xem `restoredToolRow`. Ở đây chỉ còn ba khác biệt, và cả ba đều nói cùng một
+   điều: đây là DẤU VẾT của việc đã xảy ra, không phải một tool đang sống. */
+.tool.restored {
+  margin-bottom: 6px;
+}
+
+/* Chấm xám: không xanh, không đỏ. Phiên cũ không lưu tool nào hỏng tool nào
+   xong, và bịa một màu trạng thái ở đây là nói dối đúng chỗ người ta liếc để
+   biết lượt trước có êm không. */
+.tool.restored .tool-dot {
+  color: var(--vscode-panel-border);
+}
+
+/* Không có phần bung ra, nên con trỏ không được gợi ý là bấm được. */
+.tool.restored .tool-head {
+  cursor: default;
+}

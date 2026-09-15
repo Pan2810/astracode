@@ -1,0 +1,41 @@
+# AstraCode sandbox runner — nơi tool `bash` của agent thực sự chạy.
+# Nguyên tắc: chỉ có toolchain, không có secret, không có gì ngoài /workspace.
+
+FROM node:22-bookworm-slim
+
+# Toolchain tối thiểu. Thêm gì thì thêm ở đây, đừng để agent tự apt-get
+# (mặc định không có mạng nên nó cũng không làm được).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      git \
+      ripgrep \
+      ca-certificates \
+      curl \
+      python3 \
+      python3-venv \
+      python3-pip \
+      make \
+      g++ \
+      postgresql-client \
+ && rm -rf /var/lib/apt/lists/*
+
+# Thư viện Python để agent truy vấn Postgres. Cài --break-system-packages vì
+# image dùng Debian managed Python; chỉ chạy trong sandbox nên an toàn.
+# psycopg2-binary là binary wheel, không cần biên dịch.
+RUN pip3 install --no-cache-dir --break-system-packages psycopg2-binary
+
+# Chạy bằng non-root. UID 1000 khớp user mặc định của WSL2 để file ghi ra
+# /workspace không bị root sở hữu.
+RUN groupadd -g 1000 astra 2>/dev/null || true \
+ && useradd -u 1000 -g 1000 -m -s /bin/bash astra 2>/dev/null || true
+
+# npm/pnpm cache nằm ở tmpfs (xem docker-compose.yml) vì rootfs là read-only.
+ENV NPM_CONFIG_CACHE=/tmp/.npm \
+    PNPM_HOME=/tmp/.pnpm \
+    XDG_CACHE_HOME=/tmp/.cache \
+    PATH=/tmp/.pnpm:$PATH
+
+USER astra
+WORKDIR /workspace
+
+# Container sống lâu; AstraCode chạy lệnh bằng `docker compose exec`.
+CMD ["sleep", "infinity"]

@@ -1,0 +1,90 @@
+# MCP server đóng gói sẵn của AstraCode.
+#
+# Mỗi server là một service riêng, mặc định TẮT (profiles). AstraCode bật đúng
+# service mà user đã duyệt, theo catalog servers.json.
+#
+#   docker compose -f docker-compose.mcp.yml --profile git up -d
+#
+# Ràng buộc chung, không service nào được vượt:
+#   - pin bằng digest, không dùng tag
+#   - network: none trừ khi thật sự cần, cần thì đi qua egress-proxy
+#   - chỉ mount đúng thứ server đó cần, ưu tiên :ro
+#   - KHÔNG BAO GIỜ mount /var/run/docker.sock
+
+name: astracode-mcp
+
+x-mcp-base: &mcp-base
+  init: true
+  read_only: true
+  tmpfs: ["/tmp:size=256m"]
+  user: "1000:1000"
+  cap_drop: ["ALL"]
+  security_opt: ["no-new-privileges:true"]
+  pids_limit: 256
+  mem_limit: 512m
+  stdin_open: true   # MCP stdio transport
+  environment:
+    LANG: C.UTF-8
+
+services:
+  git:
+    <<: *mcp-base
+    profiles: ["git"]
+    image: mcp/git@${MCP_GIT_DIGEST:?chưa pin digest cho mcp/git}
+    network_mode: "none"
+    volumes:
+      - ${ASTRA_WORKSPACE:?}:/workspace:ro
+
+  fetch:
+    <<: *mcp-base
+    profiles: ["fetch"]
+    image: mcp/fetch@${MCP_FETCH_DIGEST:?chưa pin digest cho mcp/fetch}
+    networks: [mcp-egress]
+    environment:
+      LANG: C.UTF-8
+      HTTP_PROXY: http://egress-proxy:8888
+      HTTPS_PROXY: http://egress-proxy:8888
+
+  playwright:
+    <<: *mcp-base
+    profiles: ["playwright"]
+    image: mcp/playwright@${MCP_PLAYWRIGHT_DIGEST:?chưa pin digest}
+    networks: [mcp-egress]
+    # Chromium cần shm lớn hơn mặc định 64m
+    shm_size: 512m
+    mem_limit: 2g
+    volumes:
+      - ${ASTRA_WORKSPACE:?}:/workspace:ro
+
+  postgres:
+    <<: *mcp-base
+    profiles: ["postgres"]
+    image: mcp/postgres@${MCP_POSTGRES_DIGEST:?chưa pin digest}
+    networks: [mcp-egress]
+    environment:
+      LANG: C.UTF-8
+      # AstraCode inject từ SecretStorage lúc khởi chạy — KHÔNG viết vào file này.
+      # DB user bắt buộc chỉ có quyền SELECT.
+      DATABASE_URL: ${ASTRA_MCP_POSTGRES_URL:?}
+
+  sqlite:
+    <<: *mcp-base
+    profiles: ["sqlite"]
+    image: mcp/sqlite@${MCP_SQLITE_DIGEST:?chưa pin digest}
+    network_mode: "none"
+    volumes:
+      - ${ASTRA_WORKSPACE:?}:/workspace:rw
+
+  memory:
+    <<: *mcp-base
+    profiles: ["memory"]
+    image: mcp/memory@${MCP_MEMORY_DIGEST:?chưa pin digest}
+    network_mode: "none"
+    volumes:
+      # State của AstraCode, KHÔNG nằm trong repo
+      - ${ASTRA_STATE_DIR:?}/mcp-memory:/state:rw
+
+networks:
+  mcp-egress:
+    external: true
+    name: astracode-sandbox_egress

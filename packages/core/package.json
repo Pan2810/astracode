@@ -1,0 +1,34 @@
+{
+  "name": "@astra/core",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Lõi agent của AstraCode. KHÔNG import 'vscode' — test được bằng vitest thuần Node.",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "demo": "tsx demo/chat.ts"
+  },
+  "dependencies": {
+    "ignore": "^6.0.2",
+    "openai": "^4.80.0",
+    "picomatch": "^4.0.2",
+    "tree-sitter-wasms": "^0.1.13",
+    "web-tree-sitter": "^0.22.6",
+    "zod": "^3.24.1",
+    "zod-to-json-schema": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/picomatch": "^3.0.1"
+  }
+}

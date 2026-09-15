@@ -1,0 +1,23 @@
+{
+  "name": "@astra/cli",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "AstraCode ngoài VS Code — cùng agent loop, cùng gateway, cùng lớp quyền.",
+  "bin": {
+    "astracode": "./dist/main.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx src/main.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@astra/core": "workspace:*",
+    "openai": "^4.80.0"
+  }
+}

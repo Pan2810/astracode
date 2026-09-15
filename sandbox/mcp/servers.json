@@ -1,0 +1,96 @@
+{
+  "$comment": [
+    "Catalog MCP server được AstraCode đóng gói sẵn.",
+    "Cấu hình .astra/mcp.json trong repo CHỈ được BẬT server có trong catalog này —",
+    "không được tự khai báo image/lệnh tùy ý. Đó là ranh giới chống supply chain.",
+    "",
+    "QUAN TRỌNG khi triển khai (M7): thay mọi 'digest' bằng sha256 THẬT lấy từ",
+    "`docker buildx imagetools inspect <image>`, và xác minh lại tên image trên",
+    "Docker MCP Catalog. Tag KHÔNG được dùng — tag có thể bị đẩy đè."
+  ],
+  "schemaVersion": 1,
+  "servers": [
+    {
+      "name": "git",
+      "image": "mcp/git",
+      "digest": "sha256:<ĐIỀN KHI TRIỂN KHAI>",
+      "description": "log, blame, diff, show — đọc lịch sử git của workspace",
+      "risk": "low",
+      "defaultEnabled": true,
+      "network": "none",
+      "mounts": ["workspace:ro"],
+      "trustLevel": "B",
+      "notes": "Chỉ đọc. Không có tool commit/push — nếu image có, phải chặn ở registry."
+    },
+    {
+      "name": "fetch",
+      "image": "mcp/fetch",
+      "digest": "sha256:<ĐIỀN KHI TRIỂN KHAI>",
+      "description": "Tải nội dung một URL về dạng text/markdown",
+      "risk": "high",
+      "defaultEnabled": false,
+      "network": "restricted",
+      "mounts": [],
+      "trustLevel": "C",
+      "notes": "RỦI RO CAO NHẤT trong catalog: đây là đường injection từ internet vào context. Output PHẢI kích hoạt hạ cấp quyền (SECURITY.md §1.5). Mặc định tắt."
+    },
+    {
+      "name": "playwright",
+      "image": "mcp/playwright",
+      "digest": "sha256:<ĐIỀN KHI TRIỂN KHAI>",
+      "description": "Điều khiển trình duyệt: mở trang, click, chụp màn hình",
+      "risk": "medium",
+      "defaultEnabled": false,
+      "network": "restricted",
+      "mounts": ["workspace:ro"],
+      "trustLevel": "C",
+      "notes": "Dùng để agent tự kiểm chứng thay đổi UI. Nội dung trang web là vùng C."
+    },
+    {
+      "name": "postgres",
+      "image": "mcp/postgres",
+      "digest": "sha256:<ĐIỀN KHI TRIỂN KHAI>",
+      "description": "Truy vấn PostgreSQL, đọc schema",
+      "risk": "medium",
+      "defaultEnabled": false,
+      "network": "restricted",
+      "mounts": [],
+      "trustLevel": "C",
+      "notes": "BẮT BUỘC dùng DB user chỉ có quyền SELECT. Connection string đọc từ SecretStorage, không để trong .astra/mcp.json. Dữ liệu trong DB là vùng C — một hàng trong bảng có thể chứa injection."
+    },
+    {
+      "name": "sqlite",
+      "image": "mcp/sqlite",
+      "digest": "sha256:<ĐIỀN KHI TRIỂN KHAI>",
+      "description": "Truy vấn file SQLite trong workspace",
+      "risk": "low",
+      "defaultEnabled": false,
+      "network": "none",
+      "mounts": ["workspace:rw"],
+      "trustLevel": "C"
+    },
+    {
+      "name": "memory",
+      "image": "mcp/memory",
+      "digest": "sha256:<ĐIỀN KHI TRIỂN KHAI>",
+      "description": "Knowledge graph lưu giữa các phiên",
+      "risk": "low",
+      "defaultEnabled": false,
+      "network": "none",
+      "mounts": ["state:rw"],
+      "trustLevel": "B",
+      "notes": "Nội dung agent tự ghi vào memory sẽ quay lại context ở phiên sau — injection có thể ngủ đông ở đây. Quét khi đọc ra."
+    }
+  ],
+  "policy": {
+    "$comment": "Ràng buộc AstraCode áp lên mọi server, không server nào được vượt.",
+    "requireWorkspaceTrust": true,
+    "requireExplicitEnablePerServer": true,
+    "defaultPermissionMode": "ask",
+    "pinByDigest": true,
+    "allowCustomServersFromRepo": false,
+    "allowCustomServersFromUserConfig": true,
+    "showToolDescriptionsBeforeEnable": true,
+    "scanToolDescriptionsForInjection": true
+  }
+}
