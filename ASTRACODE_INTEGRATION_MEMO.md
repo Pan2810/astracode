@@ -348,10 +348,12 @@ builtin — nên `package.json` của repo không phải đụng tới).
 | `lib/repoContext.mjs` | Gom ngữ cảnh repo (cây file đã lọc + dòng khớp từ khoá kèm số dòng thật) cho `fci` và `none` |
 | `lib/globs.mjs` | Khớp `exclude_globs` (`**`, `*`, `?`) — tự viết để khỏi thêm dependency |
 | `lib/redact.mjs` | Che bí mật bằng cả literal lẫn pattern, trước khi bất cứ chuỗi nào ra log/response |
+| `lib/observe.mjs` | Banner khởi động, sổ log theo `run_id`, ghi `logs/` + `results/` xuống đĩa. Mọi chuỗi đi qua đây đều đã che secret |
+| `.gitignore` | `logs/` và `results/` là vết lúc chạy, mang nội dung repo của người khác — không commit |
 | `fixtures/tickets-heading.md` | Mẫu ticket dạng heading (key `WEB-1001`, `1024`, `EXP_7`) |
 | `fixtures/tickets-table.md` | Mẫu ticket dạng bảng tiếng Việt (key `#77`, `ABC_42`, `ops.deploy.v2`) |
 | `test/fakeCli.mjs` | Đóng thế CLI của AstraCode để test/nghiệm thu chạy offline |
-| `test/*.test.mjs` | 47 test (`node --test test/*.test.mjs`), không cần mạng/gateway/token |
+| `test/*.test.mjs` | 56 test (`node --test test/*.test.mjs`), không cần mạng/gateway/token |
 | `README.md` | Bản đầy đủ của mọi thứ dưới đây |
 
 ## 2. Ba backend
@@ -479,79 +481,173 @@ chỗ, còn `start` sai thì nó đang chỉ vào hư không. Mọi lần loại
 Ngoài bốn luật trên còn hai luật phụ: trùng `path#lines` thì bỏ, và vượt
 `max_files_per_ticket` (đếm theo **file**, không theo dòng) thì loại phần dư.
 
-## 5. Trạng thái tính tới lúc bàn giao
+## 5. Quan sát được
 
-- **Backend `fci`: CHƯA chạy được lượt model thật nào.** Key FCI trả `401 Invalid API Key`
-  ở mọi lần thử (hết tiền / bị thu hồi). Đã thử đủ các quy ước header; server tự khai nó
-  muốn đúng `Authorization: Bearer {api-key}` — tức là code đúng, key mới là thứ bị từ chối.
-  **`GET /v1/models` của host đó là public**: không gửi key → `200`, gửi key → `401`. Đừng
-  dùng nó để kiểm key; phép thử đúng là `POST /v1/chat/completions` với một model có thật.
-  Hai job thật trên hai repo public đều `failed` sau ~4,5 s với đúng message `FCI trả 401`,
-  không lộ token.
-- **Backend `cli`: chưa chạy được trên máy cũ.** `packages/cli/node_modules/@astra/` rỗng —
-  thiếu link workspace, nên `dist/main.js` chết ngay với
-  `ERR_MODULE_NOT_FOUND: Cannot find package '@astra/core'`. Đây là trạng thái của cây, không
-  phải lỗi của server. Xem mục 6.
-- **Backend `none`: ĐÃ chạy thật, xanh.** Hai job liên tiếp, hai repo public khác nhau, hai
-  định dạng `tickets_md` khác nhau, không dùng credential nào:
+Thêm ngày 2026-09-15. Lý do: AstraQA gọi rồi có thể rớt kết nối, và sổ job trong bộ nhớ chỉ
+giữ 200 job — khi đó `GET /api/v1/analyze/<id>` không còn gì để trả, mà người trực đêm vẫn
+cần biết job đó đã làm gì. Nên **mỗi run để lại vết trên đĩa, độc lập với việc có ai poll hay
+không**.
 
-  | Job | Repo | tickets_md | Thời gian | Lượt parse | evidence giữ / loại / kẹp |
-  |---|---|---|---:|---:|---|
-  | NONE-A | `octocat/Spoon-Knife` | heading, 3 ticket | 2 235 ms | 3/3 | 1 / 0 / 0 |
-  | NONE-B | `psf/requests` | bảng, 3 ticket | 4 174 ms | 3/3 | 9 / 0 / 0 |
+### Ba file mỗi run
 
-- **Test: 47/47 xanh**, chạy offline (`cd tools/astraqa-server && node --test test/*.test.mjs`).
-- Chưa commit gì. Toàn bộ nằm trong working tree.
+| Đường dẫn | Nội dung | Ghi kiểu |
+|---|---|---|
+| `tools/astraqa-server/logs/<run_id>.log` | dòng thời gian của cả run | **ghi nối** — chạy lại cùng `run_id` không xoá vết cũ |
+| `tools/astraqa-server/results/<run_id>.json` | đúng object `result` của mục [3], không bọc thêm | ghi đè |
+| `tools/astraqa-server/results/<run_id>.md` | `report_md` tách riêng để mở đọc ngay | ghi đè |
 
-## 6. Việc cần làm trên máy mới
+Đổi chỗ bằng `ASTRACODE_RUNS_DIR` (mặc định là chính `tools/astraqa-server/`). Hai thư mục
+này nằm trong `.gitignore` của thư mục đó: chúng mang đường dẫn và dòng code của repo người
+khác, không có lý do gì vào lịch sử git.
 
-```bash
-corepack enable pnpm
-pnpm install --frozen-lockfile          # khôi phục link workspace @astra/core
-pnpm --filter @astra/core build
-pnpm --filter @astra/cli build
+`run_id` đến từ request nên nó là dữ liệu của người lạ mà lại được dùng làm tên file:
+`slugifyRunId()` chỉ giữ `[A-Za-z0-9._-]` và cắt mọi dấu chấm đầu chuỗi, nên `../../etc/passwd`
+thành `etc_passwd` và `..` thành `run`. Không có `run_id` thì rơi về `job-<8 ký tự đầu của job_id>`.
+Job **failed** cũng ghi đủ ba file (JSON có `status: "failed"` và `error` đã che secret) — hỏng
+mà không để lại gì thì đúng lúc cần nhất lại không có gì đọc.
 
-# đăng nhập AstraWork (JWT lấy trong VS Code: lệnh "AstraCode: Sao chép token AstraWork")
-node packages/cli/dist/main.js login --token <JWT>
-node packages/cli/dist/main.js whoami   # phải ra đúng tài khoản
+### Bốn tầng log
 
-# chuyển server sang backend cli
-#   .env:  ASTRACODE_JUDGE=cli
-#          ASTRACODE_CLI_PATH=<đường dẫn tuyệt đối tới packages/cli/dist/main.js>
-#          ASTRAWORK_JWT=<JWT>
-```
+1. **Banner lúc khởi động** — cổng, backend, model, `WORKSPACE_DIR`, đường dẫn `logs/` và
+   `results/`, và **trạng thái** từng bí mật (`SERVICE_TOKEN : đã set` / `CHƯA set`). Khai
+   trạng thái, không bao giờ khai giá trị.
+2. **Mỗi request** — `POST /api/v1/analyze ← <IP> | run_id … | job … | repo … | ref … |
+   ticket <n> | backend …`. Cả `401` cũng ghi một dòng (IP + route, không ghi token đã gửi).
+3. **Mỗi ticket** — `[2/3] WEB-1001 | 18ms | partial (confidence 0.35, matched_by_summary) |
+   bằng chứng giữ 2, loại 0, kẹp 0`, kèm lý do từng lần loại và từng lần kẹp. Một dòng cho
+   **mọi** ticket, không chỉ ticket có evidence bị loại: im lặng thì không phân biệt được
+   "chạy tốt" với "chưa chạy tới".
+4. **Kết thúc job** — tổng done/partial/missing, tổng evidence, `duration_ms`, và đường dẫn
+   hai file vừa ghi.
 
-Kiểm nhanh trước khi chạy job: `curl -sS http://127.0.0.1:8000/healthz` phải trả
-`{"status":"ok","backend":"cli","cli_path":"…"}`.
+Mỗi dòng có dấu thời gian ISO và `[<run_id>]` ở đầu, nên `grep` theo run là đủ để tách một
+job ra khỏi log chung.
 
-Trong lúc chưa có JWT lẫn key, đặt `ASTRACODE_JUDGE=none` là đường ống vẫn chạy đủ — đủ để
-AstraQA nối và test hợp đồng hai đầu.
+### Bất biến: log không chứa secret
+
+Bốn thứ **không bao giờ** được xuất hiện ở console, `logs/*.log`, `results/*.json` hay
+`results/*.md`: `FPT_API_KEY`, `ASTRAWORK_JWT`, `repo_token`, `ASTRACODE_SERVICE_TOKEN`.
+
+Cách giữ: `createRunLog()` cầm sẵn một `redact` dựng từ cả bí mật cấu hình lẫn bí mật của
+request, và **mọi** đường ghi — console lẫn đĩa — đi qua nó. Không có hàm nào ghi thẳng.
+
+`test/observe.test.mjs` canh đúng điều này: dựng server với cả bốn bí mật mang giá trị thật,
+chạy một job thật (backend `none`, offline) rồi đọc lại cả bốn đầu ra và khẳng định không
+chuỗi nào chứa bất kỳ bí mật nào. Cộng thêm: chống lái đường ghi bằng `run_id`, job failed
+vẫn để lại vết, không poll thì file vẫn có, và log ghi nối chứ không đè.
+
+## 6. Trạng thái tính tới lúc bàn giao
+
+Cập nhật 2026-09-15 trên máy mới (`E:\astracode`, Node v24.14.1, pnpm 11.21.0).
+
+- **Backend `none`: ĐANG CHẠY THẬT, xanh.** Đây là backend đang phục vụ. Hai job thật trên
+  máy này, repo public `octocat/Spoon-Knife`, cả hai `succeeded`:
+
+  | run_id | tickets_md | Thời gian | Lượt parse | evidence giữ / loại / kẹp | Kết quả |
+  |---|---|---:|---:|---|---|
+  | `RUN-SMOKE-1` | heading, 3 ticket | 1 026 ms | 3/3 | 2 / 0 / 0 | done 0, partial 1, missing 2 |
+  | `RUN-SMOKE-2` | heading tiếng Việt có dấu, 3 ticket | ~1 000 ms | 3/3 | 2 / 0 / 0 | done 0, partial 1, missing 2 |
+
+  `RUN-SMOKE-2` chạy để loại trừ nghi ngờ mã hoá: tiêu đề tiếng Việt có dấu đi qua HTTP →
+  `tickets.mjs` → `report_md` → `results/*.md` vẫn nguyên vẹn. (Ký tự hỏng thấy ở
+  `RUN-SMOKE-1` là do heredoc của shell lúc dựng payload, không phải server.)
+
+- **Backend `cli`: đã GỠ CHẶN nhưng chưa chạy được lượt thật — thiếu JWT.**
+  `pnpm install --frozen-lockfile` đã khôi phục link `packages/cli/node_modules/@astra/core`
+  (lockfile không đổi), `pnpm --filter @astra/core build` và `@astra/cli build` đều xanh, và
+  `node packages/cli/dist/main.js help` chạy — tức `ERR_MODULE_NOT_FOUND` ở máy cũ đã hết.
+  Nhưng `whoami` trả *"Chưa đăng nhập"* và `.env` không có `ASTRAWORK_JWT`, nên không có
+  token để chấm. Đây là thứ **duy nhất** còn chặn backend `cli`.
+
+- **Backend `fci`: vẫn chưa chạy được lượt model thật nào.** Chưa thử lại trên máy này. Lần
+  cuối (máy cũ) key trả `401 Invalid API Key` ở mọi lần thử. Đã thử đủ các quy ước header;
+  server tự khai nó muốn đúng `Authorization: Bearer {api-key}` — tức code đúng, key mới là
+  thứ bị từ chối. **`GET /v1/models` của host đó là public**: không gửi key → `200`, gửi key
+  → `401`. Đừng dùng nó để kiểm key; phép thử đúng là `POST /v1/chat/completions` với một
+  model có thật.
+
+- **Test: 56/56 xanh**, chạy offline (`cd tools/astraqa-server && node --test test/*.test.mjs`),
+  ~4 s. 47 ca cũ + 9 ca mới của lớp quan sát.
+
+- Đã commit vào nhánh `feat/astraqa-server` (**chưa push**).
 
 ## 7. Lệnh chạy
 
-**Khởi động** (server tự đọc `.env` ở gốc repo):
+**Khởi động** (đang chạy bằng đúng lệnh này):
 
 ```bash
-node tools/astraqa-server/server.mjs
+cd /e/astracode
+ASTRACODE_JUDGE=none PORT=8000 WORKSPACE_DIR="$TEMP/astracode-astraqa" \
+  node tools/astraqa-server/server.mjs
 ```
 
-**Tạo job:**
+Ba biến đặt ngoài là cố ý, và cả ba đều **thắng** `.env` (quy ước của `env.mjs`: biến đã
+export thắng file):
+
+- `ASTRACODE_JUDGE=none` — `.env` đang để `fci`, mà key FCI thì 401. `none` là backend duy
+  nhất chạy được lúc này.
+- `WORKSPACE_DIR` trỏ ra ngoài repo — `.env` để `./.workspace`, sẽ đẻ một thư mục untracked
+  ngay trong repo. Thư mục này bị xoá sau mỗi job nên chẳng việc gì phải nằm trong cây nguồn.
+- `PORT=8000` — trùng `.env`, ghi ra cho rõ.
+
+Server nghe ở `127.0.0.1:8000`. AstraQA (ở `localhost:7000`) gọi vào đây; endpoint và schema
+**không đổi** so với mục 3.
+
+**Kiểm nhanh** — `/healthz` không cần token:
 
 ```bash
+curl -sS http://127.0.0.1:8000/healthz
+# {"status":"ok","backend":"none","model":null,"note":"quét tất định, không gọi model"}
+```
+
+**Tạo job** (token nạp từ `.env`, không in ra màn hình):
+
+```bash
+cd /e/astracode; set -a; . ./.env; set +a
 curl -sS -X POST http://127.0.0.1:8000/api/v1/analyze \
   -H "Authorization: Bearer $ASTRACODE_SERVICE_TOKEN" \
   -H 'Content-Type: application/json' \
-  -d '{
-    "run_id": "RUN-1",
-    "repo_url": "https://github.com/octocat/Spoon-Knife.git",
-    "tickets_md": "## WEB-1001 — Them man hinh dang nhap\n\nStatus: Done\n\n## 1024: Cache ket qua tim kiem\n\nStatus: In Progress",
-    "options": { "max_files_per_ticket": 5, "timeout_sec": 600 }
-  }'
+  --data-binary @payload.json
 ```
 
-**Poll** (thay `<job_id>` bằng giá trị vừa nhận):
+`payload.json` nên dựng bằng công cụ biết ghi UTF-8 (Node, Python), đừng dựng bằng heredoc
+của shell trên Windows — xem ghi chú `RUN-SMOKE-1` ở mục 6.
+
+**Poll:**
 
 ```bash
 curl -sS http://127.0.0.1:8000/api/v1/analyze/<job_id> \
   -H "Authorization: Bearer $ASTRACODE_SERVICE_TOKEN"
 ```
+
+**Hoặc bỏ qua poll** và đọc thẳng `tools/astraqa-server/results/<run_id>.json` —
+file được ghi ngay khi job xong, không phụ thuộc có ai poll hay không.
+
+## 8. Còn thiếu gì
+
+Xếp theo thứ tự nên gỡ:
+
+1. **JWT AstraWork** — thứ duy nhất chặn backend `cli`, tức chặn nốt phần "phân tích theo
+   ngữ nghĩa". Lấy trong VS Code bằng lệnh *"AstraCode: Sao chép token AstraWork"*, rồi:
+
+   ```bash
+   node packages/cli/dist/main.js login --token <JWT>
+   node packages/cli/dist/main.js whoami        # phải ra đúng tài khoản
+   ```
+
+   Rồi khởi động lại server với `ASTRACODE_JUDGE=cli` và `ASTRAWORK_JWT=<JWT>`
+   (hoặc để AstraQA gửi `astrawork_token` trong từng request). `/healthz` khi đó phải trả
+   `{"status":"ok","backend":"cli","cli_path":"…"}`.
+
+2. **Key FCI còn tiền** — để backend `fci` dùng được. Phép thử đúng là `POST
+   /v1/chat/completions`, không phải `GET /v1/models`.
+
+3. **`none` không bao giờ trả `done`.** Quét từ khoá chứng minh được "có chỗ nhắc tới", không
+   chứng minh được "đã làm xong"; trần của nó là `partial`. Nên mọi ticket trong hai job
+   smoke ở trên đều `missing`/`partial` — đó là đúng, không phải lỗi. Đừng nới ranh giới này;
+   muốn `done` thì phải qua `cli` hoặc `fci`.
+
+4. **Chưa có xoay vòng log.** `logs/<run_id>.log` ghi nối mãi. Chạy 50 ticket × nhiều đêm thì
+   nên thêm cắt theo ngày, hoặc để AstraQA đổi `run_id` mỗi lần.
+
+5. **Chưa push.** Nhánh `feat/astraqa-server` nằm ở local.

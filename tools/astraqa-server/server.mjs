@@ -22,6 +22,8 @@ import { fileURLToPath } from 'node:url';
 import { makeRedactor, redactMessage } from './lib/redact.mjs';
 import { loadDotEnv } from './lib/env.mjs';
 import { runAnalyzeJob } from './lib/analyze.mjs';
+import { createRunLog, bannerLines } from './lib/observe.mjs';
+import { parseTickets } from './lib/tickets.mjs';
 
 const MAX_BODY_BYTES = 8 * 1024 * 1024;
 const MAX_JOBS_KEPT = 200;
@@ -36,6 +38,9 @@ export function readConfig(env = process.env) {
     cliPath: env.ASTRACODE_CLI_PATH || path.resolve(here, '..', '..', 'packages', 'cli', 'dist', 'main.js'),
     astraworkJwt: env.ASTRAWORK_JWT || '',
     serviceToken: env.ASTRACODE_SERVICE_TOKEN || '',
+    // Nơi để lại vết của mỗi run: `<runsDir>/logs/` và `<runsDir>/results/`.
+    // Khác WORKSPACE_DIR ở chỗ nó KHÔNG bị xoá sau job — đó là cả mục đích.
+    runsDir: env.ASTRACODE_RUNS_DIR || here,
 
     // Judge: `fci` gọi thẳng endpoint OpenAI-compatible (mặc định), `cli` spawn
     // CLI của AstraCode. Hai đường trả về cùng một schema items[].
@@ -65,6 +70,12 @@ function tokenOk(given, expected) {
   return timingSafeEqual(a, b);
 }
 
+/** IP của bên gọi. `::ffff:127.0.0.1` rút về `127.0.0.1` cho dễ đọc. */
+function clientIp(req) {
+  const raw = req.socket?.remoteAddress ?? '?';
+  return String(raw).replace(/^::ffff:/, '');
+}
+
 function bearerOf(req) {
   const h = req.headers.authorization ?? '';
   const m = /^Bearer\s+(.+)$/i.exec(String(h).trim());
@@ -89,12 +100,19 @@ function readBody(req) {
   });
 }
 
-export function createServer(config, { log = console.log } = {}) {
+export function createServer(config, { log = console.log, persist = true } = {}) {
   /** @type {Map<string, any>} */
   const jobs = new Map();
   const devMode = !config.serviceToken;
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const runsDir = config.runsDir || here;
 
-  function start(job, body) {
+  // Redactor cấp server: ba bí mật từ cấu hình, dùng cho mọi dòng log nằm
+  // ngoài phạm vi một job (banner, dòng request, 401/404).
+  const baseRedact = makeRedactor([config.serviceToken, config.astraworkJwt, config.fciApiKey]);
+  const slog = (msg) => log(baseRedact(String(msg ?? '')));
+
+  function start(job, body, runLog) {
     const redact = makeRedactor([
       config.serviceToken,
       config.astraworkJwt,
@@ -104,16 +122,29 @@ export function createServer(config, { log = console.log } = {}) {
     ]);
 
     job.status = 'running';
-    runAnalyzeJob({ job, body, config, redact, log })
+    runAnalyzeJob({ job, body, config, redact, log: (m) => runLog.line(m) })
       .then((result) => {
         job.status = 'succeeded';
         job.result = result;
+        const s = result.stats ?? {};
+        runLog.line(
+          `job xong: succeeded | ${result.items.length} ticket | ` +
+            `done ${result.items.filter((i) => i.code_status === 'done').length}, ` +
+            `partial ${result.items.filter((i) => i.code_status === 'partial').length}, ` +
+            `missing ${result.items.filter((i) => i.code_status === 'missing').length} | ` +
+            `bằng chứng giữ ${s.evidence_kept}, loại ${s.evidence_dropped}, kẹp ${s.evidence_clamped} | ${s.duration_ms}ms`,
+        );
+        // Ghi trước khi ai đó kịp poll: kết quả còn trên đĩa kể cả khi AstraQA
+        // rớt kết nối hoặc job rơi khỏi sổ 200 job trong bộ nhớ.
+        runLog.saveResult(result);
+        runLog.line(`đã ghi: ${runLog.jsonFile} | ${runLog.mdFile}`);
       })
       .catch((err) => {
         job.status = 'failed';
         // Bất biến: message lỗi không bao giờ mang theo token.
         job.error = redactMessage(err, redact);
-        log(`job ${job.id}: failed — ${job.error}`);
+        runLog.line(`job xong: FAILED — ${job.error}`);
+        runLog.saveFailure(job.error);
       });
   }
 
@@ -138,6 +169,8 @@ export function createServer(config, { log = console.log } = {}) {
     }
 
     if (!devMode && !tokenOk(bearerOf(req), config.serviceToken)) {
+      // Ghi lại để biết có ai gõ cửa sai token — tuyệt đối không ghi token đã gửi.
+      slog(`${new Date().toISOString()} 401 ${req.method} ${route} ← ${clientIp(req)}`);
       return sendJson(res, 401, { error: 'unauthorized: thiếu hoặc sai Authorization: Bearer <ASTRACODE_SERVICE_TOKEN>' });
     }
 
@@ -174,8 +207,33 @@ export function createServer(config, { log = console.log } = {}) {
       // Giữ bộ nhớ có trần: job cũ nhất rơi ra khi vượt ngưỡng.
       while (jobs.size > MAX_JOBS_KEPT) jobs.delete(jobs.keys().next().value);
 
+      const runLog = createRunLog({
+        runsDir,
+        runId: job.run_id,
+        jobId: job.id,
+        redact: makeRedactor([config.serviceToken, config.astraworkJwt, config.fciApiKey, body.astrawork_token, body.repo_token]),
+        log,
+        enabled: persist,
+      });
+      job.runLog = runLog;
+
+      // Đếm ticket ngay tại đây chỉ để cho vào dòng log — job vẫn tự tách lại và
+      // tự báo lỗi nếu `tickets_md` hỏng. Ở đây hỏng thì ghi `?`, không ném.
+      let ticketCount = '?';
+      try {
+        ticketCount = String(parseTickets(body.tickets_md).length);
+      } catch {
+        ticketCount = '? (tickets_md chưa dò được)';
+      }
+
+      runLog.line(
+        `POST /api/v1/analyze ← ${clientIp(req)} | run_id ${job.run_id ?? '(không có)'} | job ${job.id} | ` +
+          `repo ${body.repo_url} | ref ${body.ref || '(mặc định)'} | ticket ${ticketCount} | ` +
+          `backend ${['cli', 'fci', 'none'].includes(body.backend) ? `${body.backend} (ép theo request)` : config.judgeBackend}`,
+      );
+
       sendJson(res, 202, { job_id: job.id, status: 'queued' });
-      start(job, body);
+      start(job, body, runLog);
       return;
     }
 
@@ -196,22 +254,10 @@ export function createServer(config, { log = console.log } = {}) {
   });
 
   server.on('listening', () => {
-    // Dòng này in ra console: tuyệt đối không có giá trị key nào, chỉ "có/KHÔNG".
-    log(
-      `astraqa-server: cổng ${config.port} | backend ${config.judgeBackend}` +
-        (config.judgeBackend === 'fci'
-          ? ` | model ${config.fciModel || '(chưa đặt)'} | base ${config.fciBaseUrl || '(chưa đặt)'} | FPT_API_KEY ${config.fciApiKey ? 'có' : 'KHÔNG'}`
-          : config.judgeBackend === 'cli'
-            ? ` | cli ${config.cliPath} | astrawork token ${config.astraworkJwt ? 'có' : 'KHÔNG'}`
-            : ' | quét tất định, không gọi model') +
-        ` | workspace ${config.workspaceDir}`,
-    );
-    if (config.judgeBackend === 'fci' && !(config.fciBaseUrl && config.fciApiKey && config.fciModel)) {
-      log('CẢNH BÁO: backend "fci" thiếu FPT_BASE_URL / FPT_API_KEY / FPT_MODEL — mọi job sẽ failed.');
-    }
-    if (devMode) {
-      log('CẢNH BÁO: ASTRACODE_SERVICE_TOKEN rỗng — chế độ dev, KHÔNG kiểm xác thực. Đừng dùng ngoài máy mình.');
-    }
+    const addr = server.address();
+    const shown = { ...config, port: typeof addr === 'object' && addr ? addr.port : config.port };
+    // Banner: khai TRẠNG THÁI của mỗi bí mật ("đã set"), không bao giờ giá trị.
+    for (const row of bannerLines(shown, { runsDir, devMode })) slog(row);
   });
 
   return server;

@@ -1,0 +1,5 @@
+# Vết của mỗi run — sinh lúc chạy, không thuộc về repo.
+# Giữ trên đĩa để mở xem sau, nhưng chúng mang nội dung repo của người khác
+# (đường dẫn, dòng code trích dẫn) nên không commit.
+logs/
+results/

@@ -347,8 +347,11 @@ export async function runAnalyzeJob({ job, body, config, redact, log }) {
     const droppedByKey = new Map();
     const clampedByKey = new Map();
 
+    log(`clone xong: ${tickets.length} ticket, commit ${head || '(không rõ)'} — bắt đầu chấm bằng backend ${backend}`);
+
     for (const ticket of tickets) {
       job.current = ticket.key;
+      const ticketStartedAt = Date.now();
 
       stats.judge_calls += 1;
       const res = await judgeOnce({ backend, ticket, options: effective, repoDir, config, timeoutMs, redact, job });
@@ -374,9 +377,16 @@ export async function runAnalyzeJob({ job, body, config, redact, log }) {
       stats.evidence_kept += evidence.length;
       stats.evidence_dropped += dropped.length;
       stats.evidence_clamped += clamped.length;
-      if (dropped.length || clamped.length) {
-        log(`job ${job.id}: ${ticket.key} — giữ ${evidence.length}, loại ${dropped.length}, kẹp ${clamped.length}`);
-      }
+      // Một dòng cho MỌI ticket, không chỉ ticket có evidence bị loại: đọc log
+      // ban đêm cần thấy cả những lượt trôi chảy, nếu không thì im lặng là nhập
+      // nhằng giữa "chạy tốt" và "chưa chạy tới".
+      log(
+        `[${items.length + 1}/${tickets.length}] ${ticket.key} | ${Date.now() - ticketStartedAt}ms | ` +
+          `${item.code_status} (confidence ${item.confidence.toFixed(2)}, ${item.reason}) | ` +
+          `bằng chứng giữ ${evidence.length}, loại ${dropped.length}, kẹp ${clamped.length}` +
+          (dropped.length ? ` — loại: ${dropped.map((d) => `${d.path} (${d.why})`).join('; ')}` : '') +
+          (clamped.length ? ` — kẹp: ${clamped.map((c) => `${c.path} ${c.from}→${c.to}`).join('; ')}` : ''),
+      );
 
       items.push(item);
       job.progress = { done: items.length, total: tickets.length };

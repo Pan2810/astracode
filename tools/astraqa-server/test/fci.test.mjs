@@ -75,6 +75,7 @@ before(async () => {
     {
       port: 0,
       workspaceDir: path.join(tmp, 'ws'),
+      runsDir: path.join(tmp, 'runs'),
       cliPath: 'khong-dung-toi',
       astraworkJwt: '',
       serviceToken: TOKEN,
@@ -144,6 +145,7 @@ test('fci thiếu cấu hình → job failed với message rõ ràng', async () 
     {
       port: 0,
       workspaceDir: path.join(tmp, 'ws2'),
+      runsDir: path.join(tmp, 'runs'),
       cliPath: 'x',
       astraworkJwt: '',
       serviceToken: '',

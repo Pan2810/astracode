@@ -64,6 +64,7 @@ before(async () => {
     {
       port: 0,
       workspaceDir: path.join(tmp, 'ws'),
+      runsDir: path.join(tmp, 'runs'),
       cliPath: path.join(here, 'fakeCli.mjs'),
       astraworkJwt: '',
       serviceToken: TOKEN,

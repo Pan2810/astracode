@@ -35,6 +35,7 @@ before(async () => {
     {
       port: 0,
       workspaceDir: path.join(tmp, 'ws'),
+      runsDir: path.join(tmp, 'runs'),
       // Cố ý để trống HẾT: không CLI, không JWT, không key.
       cliPath: '',
       astraworkJwt: '',
