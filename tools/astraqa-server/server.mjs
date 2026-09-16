@@ -24,6 +24,7 @@ import { loadDotEnv } from './lib/env.mjs';
 import { runAnalyzeJob } from './lib/analyze.mjs';
 import { createRunLog, bannerLines } from './lib/observe.mjs';
 import { createLimiter } from './lib/limit.mjs';
+import { createAdminRoutes } from './lib/admin.mjs';
 import { parseTickets } from './lib/tickets.mjs';
 
 const MAX_BODY_BYTES = 8 * 1024 * 1024;
@@ -83,6 +84,22 @@ function clientIp(req) {
   return String(raw).replace(/^::ffff:/, '');
 }
 
+/**
+ * Bên gọi có đang ở chính máy này không.
+ *
+ * Trang `/admin` mở bằng trình duyệt, mà trình duyệt KHÔNG gắn `Authorization`
+ * vào một lần điều hướng thường — bắt token ở đây là biến trang demo thành thứ
+ * không mở được. Server lại chỉ `listen` trên `127.0.0.1` (xem cuối file), nên
+ * "đến được cổng này" đã đồng nghĩa với "đang ngồi trước máy này".
+ *
+ * Vẫn kiểm loopback thay vì bỏ hẳn xác thực: nếu sau này ai đó đổi chỗ `listen`
+ * sang `0.0.0.0`, các route admin lập tức đòi token trở lại thay vì mở toang.
+ */
+function isLoopback(req) {
+  const raw = String(req.socket?.remoteAddress ?? '').replace(/^::ffff:/, '');
+  return raw === '127.0.0.1' || raw === '::1';
+}
+
 function bearerOf(req) {
   const h = req.headers.authorization ?? '';
   const m = /^Bearer\s+(.+)$/i.exec(String(h).trim());
@@ -123,6 +140,16 @@ export function createServer(config, { log = console.log, persist = true } = {})
   // động. Đếm nội bộ — không hỏi nhà cung cấp, nên nó KHÔNG phải hạn mức còn
   // lại, chỉ là "phiên này đã bắn bao nhiêu viên".
   const usage = { model_calls: 0, jobs: 0 };
+
+  // Trang theo dõi chỉ đọc. Toàn bộ logic nằm ở lib/admin.mjs; ở đây chỉ nối dây.
+  const handleAdmin = createAdminRoutes({
+    jobs,
+    config,
+    usage,
+    runsDir,
+    redact: baseRedact,
+    isAuthorized: (req) => isLoopback(req) || devMode || tokenOk(bearerOf(req), config.serviceToken),
+  });
   const slog = (msg) => log(baseRedact(String(msg ?? '')));
 
   function start(job, body, runLog) {
@@ -189,6 +216,11 @@ export function createServer(config, { log = console.log, persist = true } = {})
       });
     }
 
+    // Route admin tự kiểm quyền (loopback hoặc token) nên nó đứng trước cổng
+    // dưới đây. Nó chỉ nhận đúng `/admin` và `/api/v1/jobs*`; mọi route khác
+    // rơi tiếp xuống y như cũ.
+    if (await handleAdmin(req, res, route)) return;
+
     if (!devMode && !tokenOk(bearerOf(req), config.serviceToken)) {
       // Ghi lại để biết có ai gõ cửa sai token — tuyệt đối không ghi token đã gửi.
       slog(`${new Date().toISOString()} 401 ${req.method} ${route} ← ${clientIp(req)}`);
@@ -216,6 +248,9 @@ export function createServer(config, { log = console.log, persist = true } = {})
       const job = {
         id: randomUUID(),
         run_id: body.run_id ?? null,
+        // Hai field chỉ để trang /admin hiển thị. Không nhánh logic nào đọc chúng.
+        repo_url: typeof body.repo_url === 'string' ? body.repo_url : null,
+        backend: ['cli', 'fci', 'none'].includes(body.backend) ? body.backend : config.judgeBackend,
         status: 'queued',
         progress: { done: 0, total: 0 },
         current: undefined,
