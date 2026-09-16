@@ -5,13 +5,27 @@
  * khớp, kèm số dòng thật. Không cần key, không cần mạng, không cần đăng nhập,
  * và tất định: cùng repo + cùng ticket luôn cho cùng một kết quả.
  *
- * Nó KHÔNG BAO GIỜ trả `done`. Một phép quét từ khoá chứng minh được "có chỗ
- * nhắc tới thứ này", không chứng minh được "đã làm xong" — trả `done` ở đây là
- * nói dối bằng một con số confidence trông có vẻ đáng tin. Trần của nó là
- * `partial`, và đó cũng là ranh giới giữa nó với hai backend kia.
+ * ## Ngữ nghĩa `code_status` (hợp đồng v1.1)
  *
- * Dùng để: dựng đường ống, kiểm hợp đồng HTTP với AstraQA, và có một mức nền
- * tất định để so khi model nói khác.
+ * Bản trước đặt trần cứng "không bao giờ trả `done`", lấy lý do rằng quét từ khoá
+ * không chứng minh được "đã làm xong". Đo thật trên 184 ticket cho thấy trần ấy
+ * sai hướng: nó biến mọi ticket CÓ code thành `partial`, và AstraQA đọc ra
+ * **140 `JIRA_AHEAD` trong đó 138 là giả**. Trần bảo vệ nhầm thứ.
+ *
+ * Ngữ nghĩa đúng, khớp engine nội bộ của AstraQA:
+ *
+ *   - có evidence với path thật          → `done`, confidence 0.25
+ *     Đọc là **"source có code cho ticket này"**, KHÔNG phải "đã làm đầy đủ".
+ *     Confidence thấp chính là chỗ nói điều đó; đừng đọc `done` ở đây thành
+ *     `done` của một người đã review.
+ *   - không evidence, `files_scanned > 0` → `missing` kèm bản ghi quét đầy đủ
+ *     Đây mới là `JIRA_AHEAD` thật: đã quét thật, quét xong, không thấy gì.
+ *   - không quét được file nào           → `missing`, `scan: null`
+ *     Không biết gì cả. AstraQA phải đọc thành `NO_EVIDENCE`, không bao giờ
+ *     `JIRA_AHEAD`.
+ *
+ * Phân biệt hai dòng cuối là cả lý do `scan` tồn tại: `evidence: []` một mình
+ * không nói được "đã quét và không thấy" hay "chưa quét lần nào".
  */
 import { buildRepoContext } from './repoContext.mjs';
 
@@ -42,15 +56,31 @@ export async function judgeWithoutModel({ ticket, options, repoDir }) {
     if (evidence.length >= (options.max_files_per_ticket ?? 5)) break;
   }
 
+  /**
+   * Bản ghi quét. `terms` là từ khoá THẬT đã dùng để dò từng dòng (chính
+   * `ctx.keywords` mà `buildRepoContext` cầm), không phải một danh sách gợi ý
+   * dựng lại sau. `files_scanned` là số file thật sự được mở và dò, đã áp
+   * `exclude_globs` — không phải số file ứng viên.
+   *
+   * Quét không nổi file nào thì `scan` là `null`: thà nói "không biết" còn hơn
+   * báo `files_scanned: 0` trông như một phép quét đã chạy và không thấy gì.
+   */
+  const scan = ctx.scannedFiles > 0 ? { files_scanned: ctx.scannedFiles, terms: ctx.keywords } : null;
+
+  const coEvidence = evidence.length > 0;
   return {
     items: [
       {
         key: ticket.key,
-        code_status: hits.length ? 'partial' : 'missing',
-        confidence: byKey.length ? 0.5 : hits.length ? 0.35 : 0.2,
+        code_status: coEvidence ? 'done' : 'missing',
+        confidence: coEvidence ? 0.25 : 0.2,
         evidence,
-        reason: byKey.length ? 'matched_by_key' : hits.length ? 'matched_by_summary' : 'no_match',
+        // Giữ nguyên ba giá trị cũ. Việc phân biệt "đã quét, không thấy" với
+        // "chưa quét" nằm ở `scan` (null hay không), không phải ở đây — đổi giá
+        // trị `reason` sẽ phá client cũ đang so chuỗi.
+        reason: byKey.length ? 'matched_by_key' : coEvidence ? 'matched_by_summary' : 'no_match',
       },
     ],
+    scan,
   };
 }

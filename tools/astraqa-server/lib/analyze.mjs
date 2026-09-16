@@ -95,7 +95,8 @@ async function judgeOnce({ backend, ticket, options, repoDir, config, timeoutMs,
     // Không có model nên không có gì để bóc: trả thẳng object đã dựng, nhưng nó
     // vẫn đi qua `pickItem` như hai backend kia để không có đường nào lách được
     // phần kiểm schema.
-    return { parsed: await judgeWithoutModel({ ticket, options, repoDir }), note: 'quét tất định (backend none)', stderr: '' };
+    const r = await judgeWithoutModel({ ticket, options, repoDir });
+    return { parsed: r, scan: r.scan, note: 'quét tất định (backend none)', stderr: '' };
   }
 
   if (backend === 'cli') {
@@ -110,7 +111,9 @@ async function judgeOnce({ backend, ticket, options, repoDir, config, timeoutMs,
       signal: job.abort?.signal,
     });
     if (res.timedOut) throw new Error(`Ticket "${ticket.key}": CLI quá ${Math.round(timeoutMs / 1000)}s, đã bị dừng.`);
-    return { text: res.stdout, note: `CLI thoát với mã ${res.code}`, stderr: res.stderr };
+    // Agent tự quyết đọc file nào bằng tool của nó; server không có bản ghi phép
+    // quét ấy. Bịa một con số ở đây là tệ hơn nói không biết.
+    return { text: res.stdout, scan: null, note: `CLI thoát với mã ${res.code}`, stderr: res.stderr };
   }
 
   if (!fciConfigured(config)) {
@@ -144,7 +147,12 @@ async function judgeOnce({ backend, ticket, options, repoDir, config, timeoutMs,
       },
     }),
   );
-  return { text, note: `FCI ${config.fciModel}`, usage: tokenUsage, stderr: '' };
+  // `buildRepoContext` có đi hết corpus, nhưng thứ MODEL nhìn thấy chỉ là cây
+  // file đã cắt còn `maxTreeFiles` và tối đa `maxSnippets` dòng khớp. Verdict
+  // do model ra, không do phép quét ấy ra — nên báo `files_scanned` ở đây sẽ
+  // khiến AstraQA đọc một ticket evidence rỗng thành JIRA_AHEAD chỉ vì model
+  // chưa được cho xem đúng file. Đó chính là kiểu dương tính giả cần tránh.
+  return { text, scan: null, note: `FCI ${config.fciModel}`, usage: tokenUsage, stderr: '' };
 }
 
 /** `src/a.ts:120-148` → {path, lines}. Model hay gộp như vậy dù schema tách hai field. */
@@ -272,7 +280,7 @@ function buildReportMd({ runId, generatedAt, backend, repoUrl, ref, head, items,
   out.push(`- generated_at: ${generatedAt}`);
   out.push(`- backend: \`${backend}\`${stats.model ? ` (model \`${stats.model}\`)` : ''}`);
   out.push(`- repo: ${repoUrl}${ref ? ` (ref: ${ref})` : ''}`);
-  if (head) out.push(`- commit: \`${head}\``);
+  if (head) out.push(`- commit (source_revision): \`${head}\``);
   out.push(`- tickets: ${items.length} — done ${count('done')}, partial ${count('partial')}, missing ${count('missing')}`);
   out.push(`- bằng chứng: giữ ${stats.evidence_kept}, loại ${stats.evidence_dropped}, kẹp ${stats.evidence_clamped}`);
   out.push(`- lượt judge: ${stats.judge_parsed}/${stats.judge_calls} parse được${stats.judge_failed ? `, **${stats.judge_failed} lượt hỏng**` : ''}`);
@@ -326,6 +334,15 @@ function buildReportMd({ runId, generatedAt, backend, repoUrl, ref, head, items,
     }
     out.push(`- code_status: **${it.code_status}** (confidence ${it.confidence.toFixed(2)}, reason: ${it.reason})`);
     if (t?.status) out.push(`- trạng thái do nguồn ngoài báo: ${t.status}`);
+    // Bản ghi quét: chỗ phân biệt "đã quét, không thấy" với "chưa quét lần nào".
+    if (it.scan) {
+      out.push(
+        `- đã quét **${it.scan.files_scanned} file** @ \`${String(it.scan.revision ?? '(không rõ)').slice(0, 12)}\` — ` +
+          `từ khoá: ${it.scan.terms.map((k) => `\`${k}\``).join(', ') || '(không có)'}`,
+      );
+    } else {
+      out.push('- _không có bản ghi quét (`scan: null`) — backend này không quét toàn bộ corpus._');
+    }
     out.push('');
     if (it.evidence.length) {
       for (const ev of it.evidence) {
@@ -407,6 +424,10 @@ export async function runAnalyzeJob({ job, body, config, redact, log, limiter = 
     max_tickets: maxTickets,
     hits_429: 0,
     hits_503: 0,
+    // Bao nhiêu item mang được bản ghi quét thật. `items_without_scan` là số
+    // item mà AstraQA KHÔNG được phép kết luận JIRA_AHEAD.
+    items_with_scan: 0,
+    items_without_scan: 0,
     evidence_kept: 0,
     evidence_dropped: 0,
     evidence_clamped: 0,
@@ -463,6 +484,10 @@ export async function runAnalyzeJob({ job, body, config, redact, log, limiter = 
         }
 
         item = pickItem(parsed, ticket.key);
+        // `pickItem` chỉ trả về đúng năm field cũ, nên `scan` gắn vào ở đây.
+        // Bắt buộc có mặt ở MỌI item — `null` là một câu trả lời hợp lệ ("không
+        // biết"), còn thiếu field thì client không phân biệt được với `null`.
+        item.scan = res.scan ? { ...res.scan, revision: head || null } : null;
         stats.judge_parsed += 1;
       } catch (err) {
         const why = redact(err instanceof Error ? err.message : String(err));
@@ -480,7 +505,10 @@ export async function runAnalyzeJob({ job, body, config, redact, log, limiter = 
           confidence: 0,
           evidence: [],
           reason: `judge_failed: ${why}`,
+          // Lượt hỏng nghĩa là chưa quét được gì — `null`, không phải 0.
+          scan: null,
         });
+        stats.items_without_scan += 1;
         droppedByKey.set(ticket.key, []);
         clampedByKey.set(ticket.key, []);
         job.progress = { done: items.length, total: tickets.length };
@@ -505,6 +533,7 @@ export async function runAnalyzeJob({ job, body, config, redact, log, limiter = 
           (clamped.length ? ` — kẹp: ${clamped.map((c) => `${c.path} ${c.from}→${c.to}`).join('; ')}` : ''),
       );
 
+      stats[item.scan ? 'items_with_scan' : 'items_without_scan'] += 1;
       items.push(item);
       job.progress = { done: items.length, total: tickets.length };
     }
@@ -518,7 +547,10 @@ export async function runAnalyzeJob({ job, body, config, redact, log, limiter = 
         confidence: 0,
         evidence: [],
         reason: 'skipped_quota_limit',
+        // Chưa xét lần nào thì cũng chưa quét lần nào.
+        scan: null,
       });
+      stats.items_without_scan += 1;
       droppedByKey.set(ticket.key, []);
       clampedByKey.set(ticket.key, []);
       job.progress = { done: items.length, total: tickets.length };
@@ -539,6 +571,9 @@ export async function runAnalyzeJob({ job, body, config, redact, log, limiter = 
       run_id: body.run_id ?? null,
       generated_at: generatedAt,
       backend,
+      // SHA đầy đủ của commit đã clone. Cùng giá trị lặp lại trong `item.scan.revision`
+      // để mỗi item tự chứa, dựng được link dẫn chứng mà không phải ngoái lên.
+      source_revision: head || null,
       items,
       report_md: buildReportMd({
         runId: body.run_id ?? job.id,

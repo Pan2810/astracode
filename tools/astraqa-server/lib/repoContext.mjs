@@ -69,6 +69,10 @@ export async function buildRepoContext({ repoDir, ticket, excludeGlobs = [], max
   const keywords = keywordsOf(ticket);
   const snippets = [];
   let budget = MAX_TOTAL_BYTES;
+  // Ðếm file THỰC SỰ được mở và dò từng dòng — không phải số file ứng viên.
+  // Vòng lặp dưới đây dừng sớm khi đủ `maxSnippets` hoặc hết `budget`, và bỏ qua
+  // file quá lớn / nhị phân trá hình; báo `files.length` sẽ là bịa.
+  let scannedFiles = 0;
 
   for (const rel of files) {
     if (snippets.length >= maxSnippets || budget <= 0) break;
@@ -90,6 +94,8 @@ export async function buildRepoContext({ repoDir, ticket, excludeGlobs = [], max
     }
     if (text.includes('\u0000')) continue; // nhị phân trá hình
 
+    // Tới được đây nghĩa là file đã thật sự được mở và sắp dò từng dòng.
+    scannedFiles += 1;
     const lines = text.split(/\r?\n/);
     for (let i = 0; i < lines.length && snippets.length < maxSnippets; i++) {
       const low = lines[i].toLowerCase();
@@ -102,6 +108,10 @@ export async function buildRepoContext({ repoDir, ticket, excludeGlobs = [], max
   return {
     files: files.slice(0, maxTreeFiles),
     totalFiles: files.length,
+    // Số file đã mở và dò thật, sau khi áp `exclude_globs` và các bộ lọc khác.
+    scannedFiles,
+    // Vòng lặp có dừng sớm không — nếu có thì `scannedFiles` nhỏ hơn corpus.
+    scanTruncated: scannedFiles < files.length,
     truncated: files.length > maxTreeFiles,
     snippets,
     keywords,

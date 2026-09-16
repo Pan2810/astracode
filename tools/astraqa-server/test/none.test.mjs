@@ -91,7 +91,10 @@ test('chạy trọn job mà không có key/JWT/CLI nào', async () => {
 
   const [hit, miss] = done.result.items;
   assert.equal(hit.key, 'WEB-1001');
-  assert.equal(hit.code_status, 'partial');
+  // Hợp đồng v1.1: có evidence path thật → `done` với confidence thấp. Ðọc là
+  // "source có code cho ticket này", không phải "đã làm đầy đủ".
+  assert.equal(hit.code_status, 'done');
+  assert.equal(hit.confidence, 0.25);
   assert.equal(hit.reason, 'matched_by_key');
   assert.ok(hit.evidence.length > 0);
   for (const ev of hit.evidence) {
@@ -103,13 +106,21 @@ test('chạy trọn job mà không có key/JWT/CLI nào', async () => {
   assert.equal(miss.code_status, 'missing');
   assert.equal(miss.reason, 'no_match');
   assert.deepEqual(miss.evidence, []);
+  // Ðây mới là lúc bản ghi quét quan trọng nhất: evidence rỗng mà ĐÃ quét thật.
+  assert.ok(miss.scan, 'ticket không có evidence vẫn phải mang bản ghi quét');
+  assert.ok(miss.scan.files_scanned > 0);
 });
 
-test('không bao giờ trả "done" — quét từ khoá không chứng minh được hoàn thành', async () => {
+test('"done" của backend none là "source có code", không phải "đã làm đầy đủ"', async () => {
   const done = await analyze({ repo_url: repoUrl, tickets_md: '## login — login login login' });
   assert.equal(done.status, 'succeeded', done.error);
-  assert.notEqual(done.result.items[0].code_status, 'done');
-  assert.ok(done.result.items[0].confidence <= 0.5);
+  const it = done.result.items[0];
+  assert.equal(it.code_status, 'done');
+  // Confidence thấp CHÍNH LÀ chỗ nói "đây chỉ là quét từ khoá". Trần cũ
+  // ("không bao giờ done") sinh ra 138 JIRA_AHEAD giả trên 184 ticket nên đã bỏ;
+  // nhưng con số này thì đừng nâng — nó là thứ còn lại để cảnh báo người đọc.
+  assert.ok(it.confidence <= 0.3, `confidence phải thấp, nhận ${it.confidence}`);
+  assert.ok(it.evidence.length > 0, '"done" mà không có evidence là vô nghĩa');
 });
 
 test('ép backend theo từng request qua field "backend"', async () => {
