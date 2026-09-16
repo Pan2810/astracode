@@ -17,6 +17,7 @@ import { promisify } from 'node:util';
 import { pathToFileURL } from 'node:url';
 import { createServer, readConfig } from '../server.mjs';
 import { bannerLines } from '../lib/observe.mjs';
+import { TIGHTEN_MODE } from '../lib/candidates.mjs';
 
 const run = promisify(execFile);
 const TOKEN = 'service-token-maxtickets-0123456789';
@@ -180,6 +181,10 @@ test('/healthz khai model, MAX_TICKETS và số lượt gọi của phiên', asy
     assert.equal(truoc.backend, 'none');
     assert.equal(truoc.max_tickets, 2);
     assert.equal(truoc.judge_concurrency, 2);
+    // Chế độ siết của matcher phải nhìn thấy được từ ngoài: bản đang chạy dùng
+    // luật nào là câu hỏi đầu tiên khi một dòng verdict trông lạ.
+    assert.equal(truoc.tighten_mode, TIGHTEN_MODE);
+    assert.equal(truoc.tighten_mode, 'none');
     assert.equal(truoc.model, null, 'backend none thì không có model');
     assert.equal(truoc.model_calls_this_session, 0);
     assert.equal(truoc.jobs_this_session, 0);

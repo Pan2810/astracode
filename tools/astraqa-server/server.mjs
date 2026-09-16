@@ -25,6 +25,7 @@ import { runAnalyzeJob } from './lib/analyze.mjs';
 import { createRunLog, bannerLines } from './lib/observe.mjs';
 import { createLimiter } from './lib/limit.mjs';
 import { createAdminRoutes } from './lib/admin.mjs';
+import { TIGHTEN_MODE } from './lib/candidates.mjs';
 import { parseTickets } from './lib/tickets.mjs';
 
 const MAX_BODY_BYTES = 8 * 1024 * 1024;
@@ -235,6 +236,9 @@ export function createServer(config, { log = console.log, persist = true } = {})
         model: config.judgeBackend === 'fci' ? config.fciModel || null : null,
         max_tickets: config.maxTickets ?? 0,
         judge_concurrency: config.judgeConcurrency ?? 2,
+        // Chế độ siết của matcher (§5). Ðã đóng băng; khai ra để nhìn một cái là
+        // biết bản đang chạy dùng luật nào, không phải đi đọc source.
+        tighten_mode: TIGHTEN_MODE,
         // Ðếm nội bộ từ lúc khởi động — KHÔNG hỏi nhà cung cấp, nên đây không
         // phải hạn mức còn lại. Lượt thử lại cũng tính, vì nó cũng là request thật.
         model_calls_this_session: usage.model_calls,
@@ -344,7 +348,7 @@ export function createServer(config, { log = console.log, persist = true } = {})
     const addr = server.address();
     const shown = { ...config, port: typeof addr === 'object' && addr ? addr.port : config.port };
     // Banner: khai TRẠNG THÁI của mỗi bí mật ("đã set"), không bao giờ giá trị.
-    for (const row of bannerLines(shown, { runsDir, devMode })) slog(row);
+    for (const row of bannerLines({ ...shown, tightenMode: TIGHTEN_MODE }, { runsDir, devMode })) slog(row);
   });
 
   return server;

@@ -344,3 +344,51 @@ Recall probe (ticket giả lập khớp vừa đúng 2 term đặc trưng) cho `
 số ấy là thật nhưng probe đó thiên lệch — nó dựng ticket từ term hiếm nhất của file đích. Trên
 dữ liệu thật `min_terms_3` khớp 161/184, tức đánh đổi nhỏ hơn probe gợi ý nhiều. Vẫn nên biết
 rằng ticket ngắn khớp đúng hai từ sẽ mất.
+
+
+---
+
+# TIGHTEN_MODE = `none` — CHỐT 2026-09-16
+
+Quyết định của chủ dự án sau khi có bảng đo. Matcher đóng băng từ đây.
+
+## Vì sao `none`
+
+| chế độ | khớp/184 | lệch | hướng lệch | ca B |
+|---|---:|---:|---|---|
+| **`none`** ← chọn | **181** | 3 | tất cả đều khẳng định ÍT hơn | trượt |
+| `coverage` | 178 | 6 | | trượt |
+| `min_terms_3` | 161 | 23 | | đạt |
+| `rare_term` | 138 | 46 | | đạt |
+
+Hai lý do:
+
+1. **Agreement cao nhất**, và cả ba ticket lệch đều theo hướng `MATCH`/`CODE_AHEAD` →
+   `JIRA_AHEAD`. Nó không bao giờ dựng ra bằng chứng mà AstraQA không thấy.
+2. **`min_terms_3` đổi một dương tính giả xanh lấy 25 dòng đỏ sai.** Trên màn hình demo một
+   dòng đỏ sai đắt hơn nhiều một dòng xanh thừa: dòng đỏ mời người xem hỏi "vì sao ticket này
+   bảo chưa làm", và câu trả lời sẽ là "tại ngưỡng".
+
+## HẠN CHẾ ÐÃ BIẾT — ca thử B của spec §6 TRƯỢT
+
+```
+GEN-R999  "Quantum blockchain consensus sharding /
+           Implement zero-knowledge rollup validator staking"
+  → vẫn khớp ui/cowork_tab.py qua hai từ tình cờ: "zero" + "knowledge"
+```
+
+Spec §5 nói `backend=none` nên chặt hơn AstraQA vì không có judge dọn sau. **Ta cố ý không
+theo**, đổi lấy 20 ticket đúng (181 so với 161).
+
+Ðây là đánh đổi có ý thức, **KHÔNG phải lỗi cần sửa**. Matcher đã đóng băng; nếu ca B thành
+vấn đề thật trên dữ liệu khác thì mở lại bằng một quyết định mới kèm số đo mới, không phải
+bằng một bản vá.
+
+Khi demo bị hỏi về một dòng xanh trông lạ, câu trả lời trung thực là: `backend=none` chỉ chứng
+minh **"source có code nhắc tới ticket này"** — đó cũng chính là lý do `confidence` của nó là
+0.25 chứ không phải 0.9.
+
+## Nhìn thấy chế độ đang chạy từ đâu
+
+`/healthz` khai `tighten_mode`, và banner lúc khởi động in một dòng `matcher :`. Không phải mở
+source để biết bản đang chạy dùng luật nào.

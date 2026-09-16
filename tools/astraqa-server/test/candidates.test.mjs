@@ -45,8 +45,18 @@ test('§1.6 — cụm CJK cắt tại hiragana rồi bigram hoá', () => {
 test('§1.3 — ticket key khớp nguyên chuỗi, KHÔNG BAO GIỜ tách mảnh', () => {
   assert.equal(normalizedKey({ key: 'GEN-R169' }), 'gen-r169');
   assert.equal(normalizedKey({ key: 'COWORKLOCAL-14' }), 'coworklocal-14');
+  assert.equal(normalizedKey({ key: 'PRE-001' }), 'pre-001');
   assert.equal(normalizedKey({ key: 'khong-phai-key' }), null);
   assert.equal(normalizedKey({ key: '#77' }), null);
+
+  // Chữ HOA mới là thứ chặn. Mười một chuỗi dưới đây đều lọt qua bản regex cũ
+  // ("có ít nhất một chữ số sau dấu gạch") và biến thành "ticket key" giả.
+  for (const bay of [
+    'utf-8', 'sha-256', 'covid-19', 'base-64', 'md-5', 'http-2',
+    'es-2015', 'gpt-4', 'x-11', 'iso-8601', 'rfc-7231',
+  ]) {
+    assert.equal(normalizedKey({ key: bay }), null, `"${bay}" không phải ticket key`);
+  }
 
   // Ðây là lỗi lớn nhất spec đo được: `gen` bị trích 294 lần.
   const terms = queryTerms({ key: 'GEN-R169', title: 'Model Pricing', body: '' });
@@ -95,10 +105,27 @@ test('§1.2 — dòng PO:/BA:/Developer: bị loại, tên người không thàn
   const terms = queryTerms({
     key: 'GEN-R169',
     title: 'Model Pricing',
-    body: 'PO: QuanDh14\nBA: QuanDh14\nDeveloper: QuanDh14',
+    body: [
+      'PO: QuanDh14',
+      'BA: QuanDh14',
+      'Developer: QuanDh14',
+      'Ngày nhận: 46244',
+      'Ghi chú: NamPDT,HiepHV3,LamHV7',
+    ].join('\n'),
   });
-  for (const rac of ['quandh14', 'quan', 'dh14', 'developer']) {
+  // Danh sách nhãn AstraQA chốt 2026-09-16, gồm cả hai nhãn tiếng Việt có thật
+  // trong export này.
+  for (const rac of [
+    'quandh14', 'quan', 'dh14', 'developer',
+    'ngay', 'nhan', '46244', 'ghi', 'chu',
+    'nampdt', 'hiephv3', 'lamhv7', 'nam', 'hiep', 'lam',
+  ]) {
     assert.ok(!terms.includes(rac), `"${rac}" lọt vào terms: ${terms}`);
+  }
+  // Nhãn không dấu cũng phải bắt được — cùng một trường, khác cách gõ.
+  const khongDau = queryTerms({ key: 'X-1', title: 'abc', body: 'Ghi chu: NamPDT\nNgay nhan: 46244' });
+  for (const rac of ['nampdt', '46244']) {
+    assert.ok(!khongDau.includes(rac), `"${rac}" lọt qua nhãn không dấu: ${khongDau}`);
   }
 });
 
@@ -187,14 +214,14 @@ test('§4.1 — sàn 2 term áp cả ở phía ticket lẫn phía từng file', 
 test('§5 — chế độ siết đang dùng đã được ghi rõ', () => {
   assert.ok(['none', 'min_terms_3', 'rare_term', 'coverage'].includes(TIGHTEN_MODE));
   /**
-   * TẠM THỜI, chưa phải quyết định cuối — AstraQA đang đo bảng song song.
+   * ÐÃ CHỐT 2026-09-16, matcher đóng băng.
    *
-   * `rare_term` đã bị bỏ: nó hiệu chỉnh trên probe hỏng và chỉ khớp 138/184 trên
-   * dữ liệu thật. Trong hai chế độ còn ĐẠT ca thử B (điều kiện cần),
-   * `min_terms_3` đo tốt hơn hẳn: 161/184.
+   * `none` cho agreement cao nhất với AstraQA (181/184), và cả ba ticket lệch đều
+   * theo hướng khẳng định ÍT hơn — nó không dựng ra bằng chứng AstraQA không thấy.
+   * `min_terms_3` đổi một dương tính giả xanh lấy 25 dòng đỏ sai.
    *
    * Ðổi giá trị này là đổi bảng nghiệm thu, nên phải đi kèm số đo mới —
    * `node scripts/tighten-table.mjs --keep <clone>`.
    */
-  assert.equal(TIGHTEN_MODE, 'min_terms_3');
+  assert.equal(TIGHTEN_MODE, 'none');
 });

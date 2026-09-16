@@ -122,6 +122,7 @@ export function bannerLines(config, { runsDir, devMode }) {
     `  WORKSPACE_DIR : ${config.workspaceDir}`,
     `  song song     : tối đa ${config.judgeConcurrency ?? 2} lượt judge cùng lúc (cả server)`,
     `  MAX_TICKETS   : ${config.maxTickets ? `${config.maxTickets} ticket đầu mỗi job (phần còn lại → skipped_quota_limit)` : '0 (không giới hạn)'}`,
+    `  matcher       : CANDIDATE_MATCHING_SPEC, siết "${config.tightenMode ?? '?'}" (đóng băng 2026-09-16)`,
     `  logs          : ${path.join(runsDir, 'logs')}`,
     `  results       : ${path.join(runsDir, 'results')}`,
     `  SERVICE_TOKEN : ${yn(config.serviceToken)}`,
