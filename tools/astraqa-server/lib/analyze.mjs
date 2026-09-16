@@ -22,6 +22,7 @@ import { askFci, fciConfigured } from './fciJudge.mjs';
 import { judgeWithoutModel } from './noneJudge.mjs';
 import { buildRepoContext, renderContext } from './repoContext.mjs';
 import { createLimiter } from './limit.mjs';
+import { buildIndex } from './candidates.mjs';
 
 export const DEFAULT_OPTIONS = {
   max_files_per_ticket: 5,
@@ -90,12 +91,12 @@ function runCli({ cliPath, cwd, prompt, astraworkToken, timeoutMs, signal }) {
  * Một lượt judge cho một ticket. Trả về văn bản thô của model — phần bóc JSON
  * nằm ngoài, dùng chung cho cả hai backend.
  */
-async function judgeOnce({ backend, ticket, options, repoDir, config, timeoutMs, redact, job, log, stats, limiter, usage }) {
+async function judgeOnce({ backend, ticket, options, repoDir, config, timeoutMs, redact, job, log, stats, limiter, usage, index }) {
   if (backend === 'none') {
     // Không có model nên không có gì để bóc: trả thẳng object đã dựng, nhưng nó
     // vẫn đi qua `pickItem` như hai backend kia để không có đường nào lách được
     // phần kiểm schema.
-    const r = await judgeWithoutModel({ ticket, options, repoDir });
+    const r = await judgeWithoutModel({ ticket, options, index });
     return { parsed: r, scan: r.scan, note: 'quét tất định (backend none)', stderr: '' };
   }
 
@@ -455,6 +456,22 @@ export async function runAnalyzeJob({ job, body, config, redact, log, limiter = 
         `chấm ${toJudge.length} bằng backend ${backend}${skipped.length ? `, bỏ qua ${skipped.length} vì ASTRACODE_MAX_TICKETS` : ''}`,
     );
 
+    /**
+     * Index toàn repo, dựng ÐÚNG MỘT LẦN cho cả job.
+     *
+     * Bắt buộc một lần vì `document_frequency` là đại lượng toàn repo: nó không
+     * tính được từ một lượt quét riêng của một ticket. (Bản cũ quét lại cả repo
+     * cho từng ticket — 184 ticket là 184 lần đi cây thư mục.)
+     *
+     * Chỉ backend `none` cần; `fci` và `cli` để model/agent tự tìm.
+     */
+    let index = null;
+    if (backend === 'none') {
+      const tIndex = Date.now();
+      index = await buildIndex({ repoDir, fs, path, excludeGlobs: effective.exclude_globs, matchesAny });
+      log(`index: ${index.N} file, ${index.df.size} term khác nhau, dựng trong ${Date.now() - tIndex}ms`);
+    }
+
     for (const ticket of toJudge) {
       job.current = ticket.key;
       const ticketStartedAt = Date.now();
@@ -470,7 +487,7 @@ export async function runAnalyzeJob({ job, body, config, redact, log, limiter = 
       let item;
       try {
         const res = await judgeOnce({
-          backend, ticket, options: effective, repoDir, config, timeoutMs, redact, job, log, stats, limiter, usage,
+          backend, ticket, options: effective, repoDir, config, timeoutMs, redact, job, log, stats, limiter, usage, index,
         });
 
         let parsed;

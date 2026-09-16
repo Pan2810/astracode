@@ -21,7 +21,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { parseTickets } from '../lib/tickets.mjs';
 import { judgeWithoutModel } from '../lib/noneJudge.mjs';
-import { keywordsOf } from '../lib/repoContext.mjs';
+import { buildIndex } from '../lib/candidates.mjs';
+import { matchesAny } from '../lib/globs.mjs';
 import { cloneRepo } from '../lib/git.mjs';
 import { keepRealEvidence, DEFAULT_OPTIONS } from '../lib/analyze.mjs';
 
@@ -77,8 +78,12 @@ async function doMot({ ticketsFile, repo, label, out, keep }) {
   const rows = [];
   const t0 = Date.now();
 
+  // Index toàn repo dựng MỘT LẦN — `document_frequency` là đại lượng toàn repo.
+  const index = await buildIndex({ repoDir, fs, path, excludeGlobs: options.exclude_globs, matchesAny });
+  process.stderr.write(`index: ${index.N} file, ${index.df.size} term\n`);
+
   for (const ticket of tickets) {
-    const r = await judgeWithoutModel({ ticket, options, repoDir });
+    const r = await judgeWithoutModel({ ticket, options, index });
     const item = r.items[0];
     const { evidence } = await keepRealEvidence(item.evidence, repoDir, options);
     item.evidence = evidence;
@@ -92,7 +97,7 @@ async function doMot({ ticketsFile, repo, label, out, keep }) {
       reason: item.reason,
       evidence: item.evidence,
       scan: item.scan,
-      terms: keywordsOf(ticket),
+      terms: item.scan?.terms ?? [],
       verdict: verdictOf(item, ticket),
     });
   }
@@ -121,8 +126,12 @@ function thongKe(s) {
   for (const r of s.rows) {
     for (const ev of r.evidence) {
       theoFile.set(ev.path, (theoFile.get(ev.path) ?? 0) + 1);
-      const term = /khớp từ khoá "([^"]+)"/.exec(ev.note)?.[1] ?? '?';
-      theoTerm.set(term, (theoTerm.get(term) ?? 0) + 1);
+      // Hai dạng ghi chú: luật cũ `khớp từ khoá "x"`, luật mới `khớp N từ khoá: a, b`.
+      const cu = /khớp từ khoá "([^"]+)"/.exec(ev.note)?.[1];
+      const moi = /khớp \d+ từ khoá: ([^(]+)/.exec(ev.note)?.[1];
+      const key = /khớp ticket key "([^"]+)"/.exec(ev.note)?.[1];
+      const ds = cu ? [cu] : key ? [key] : moi ? moi.split(',').map((x) => x.trim()) : ['?'];
+      for (const t of ds) theoTerm.set(t, (theoTerm.get(t) ?? 0) + 1);
     }
   }
 

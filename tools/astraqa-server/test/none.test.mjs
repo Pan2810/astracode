@@ -23,9 +23,26 @@ let repoUrl;
 before(async () => {
   tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'astraqa-none-'));
   const dir = path.join(tmp, 'repo');
+  // Repo phải có đủ vài file CODE thật: từ 2026-09-16 backend `none` chấm điểm
+  // theo document_frequency toàn repo (CANDIDATE_MATCHING_SPEC §4.2), nên một
+  // repo hai file cho ceiling = 1 và gần như mọi term bị coi là phổ biến.
+  // `README.md` cũng không còn được quét — §3.1 dùng allowlist đuôi mã nguồn.
   await fs.mkdir(path.join(dir, 'src'), { recursive: true });
-  await fs.writeFile(path.join(dir, 'src', 'login.py'), 'import os\n\n\ndef login(user):\n    return True\n');
-  await fs.writeFile(path.join(dir, 'README.md'), '# demo\n\nWEB-1001 da duoc lam o src/login.py\n');
+  await fs.writeFile(
+    path.join(dir, 'src', 'login.py'),
+    'import hashlib\n\n\ndef authenticate(username, password):\n    """man hinh dang nhap"""\n    return hashlib.sha256(password.encode()).hexdigest()\n\n\ndef logout(session):\n    session.clear()\n',
+  );
+  await fs.writeFile(path.join(dir, 'src', 'cache.py'), 'CACHE = {}\n\n\ndef cache_lookup(key):\n    return CACHE.get(key)\n');
+  await fs.writeFile(path.join(dir, 'src', 'billing.py'), 'def invoice_total(items):\n    return sum(i.amount for i in items)\n');
+  await fs.writeFile(path.join(dir, 'src', 'report.py'), 'def render_report(rows):\n    return "\\n".join(str(r) for r in rows)\n');
+  await fs.writeFile(path.join(dir, 'src', 'upload.py'), 'def store_attachment(blob):\n    return len(blob)\n');
+  await fs.writeFile(path.join(dir, 'src', 'router.py'), 'ROUTES = {}\n\n\ndef dispatch(path):\n    return ROUTES.get(path)\n');
+  // Ticket key nằm trong chính mã nguồn → §1.3 khớp nguyên chuỗi, matched_by_key.
+  // README.md không dùng được nữa: §3.1 chỉ quét file có đuôi mã nguồn.
+  await fs.writeFile(
+    path.join(dir, 'src', 'session.py'),
+    '# WEB-1001: man hinh dang nhap\n\n\ndef start_session(user):\n    return {"user": user}\n',
+  );
   await run('git', ['init', '-q', '-b', 'main'], { cwd: dir });
   await run('git', ['add', '-A'], { cwd: dir });
   await run('git', ['-c', 'user.email=t@e.invalid', '-c', 'user.name=t', 'commit', '-q', '-m', 'i'], { cwd: dir });
@@ -98,9 +115,10 @@ test('chạy trọn job mà không có key/JWT/CLI nào', async () => {
   assert.equal(hit.reason, 'matched_by_key');
   assert.ok(hit.evidence.length > 0);
   for (const ev of hit.evidence) {
-    assert.ok(['README.md', 'src/login.py'].includes(ev.path), `đường dẫn lạ: ${ev.path}`);
+    assert.ok(ev.path.endsWith('.py'), `chỉ file mã nguồn mới được trích: ${ev.path}`);
     assert.match(ev.lines, /^\d+$/);
   }
+  assert.ok(hit.evidence.some((e) => e.path === 'src/session.py'), 'file mang ticket key phải có trong evidence');
 
   assert.equal(miss.key, 'ZZZ-999');
   assert.equal(miss.code_status, 'missing');
@@ -112,7 +130,9 @@ test('chạy trọn job mà không có key/JWT/CLI nào', async () => {
 });
 
 test('"done" của backend none là "source có code", không phải "đã làm đầy đủ"', async () => {
-  const done = await analyze({ repo_url: repoUrl, tickets_md: '## login — login login login' });
+  // Ticket phải có ÍT NHẤT hai term đặc trưng: §4.1 đặt sàn `_MIN_TERMS = 2`, nên
+  // một từ lặp lại ba lần vẫn chỉ là một term và cho shortlist rỗng (đúng như ca C).
+  const done = await analyze({ repo_url: repoUrl, tickets_md: '## AUTH-7 — authenticate password hashing' });
   assert.equal(done.status, 'succeeded', done.error);
   const it = done.result.items[0];
   assert.equal(it.code_status, 'done');

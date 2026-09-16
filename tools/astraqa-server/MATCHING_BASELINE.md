@@ -1,88 +1,160 @@
-# Mốc "TRƯỚC" của luật khớp ticket↔code
+# Luật khớp ticket↔code — trước và sau khi port CANDIDATE_MATCHING_SPEC
 
-Chụp ngày 2026-09-16, **trước** khi cài `CANDIDATE_MATCHING_SPEC.md` của AstraQA.
-Mục đích: có một con số cố định để so sau khi đổi luật. Chưa sửa dòng code nào.
+Cập nhật 2026-09-16, sau khi cài `CANDIDATE_MATCHING_SPEC.md` của AstraQA
+(`lib/candidates.mjs`). Cùng hằng số, cùng stopword, cùng ngưỡng — hai bên khác luật thì
+bảng so sánh giữa hai engine vô nghĩa.
 
-> Bảng dưới đo trên **bộ ticket tổng hợp** (`fixtures/tickets-184-tonghop.md`), không phải
-> 184 ticket thật của AstraQA. Khi có file ticket thật, chạy lại đúng lệnh ở cuối với
-> `--tickets <file thật>` để có mốc so sánh đúng.
+> **Bảng dưới đo trên bộ ticket TỔNG HỢP** (`fixtures/tickets-184-gen.md`), không phải 184
+> ticket thật của AstraQA. Bảng nghiệm thu §7 (`MATCH 138 · CODE_AHEAD 44 · JIRA_AHEAD 2`)
+> **chưa so được** — cần file `tickets_md` thật. Xem mục "Còn thiếu" ở cuối.
 
-## Cách đo
+## Cách đo lại
 
 ```bash
 cd tools/astraqa-server
-node scripts/measure-matching.mjs \
-  --tickets fixtures/tickets-184-tonghop.md \
-  --repo https://github.com/psf/requests.git \
-  --label "TRƯỚC" --out truoc.json --keep /tmp/repo-do
+# TRƯỚC: bản code ngay trước khi port spec
+git archive 9b9f84f tools/astraqa-server | tar -x -C /tmp/before
+cd /tmp/before/tools/astraqa-server
+node scripts/measure-matching.mjs --tickets fixtures/tickets-184-gen.md \
+  --repo https://github.com/Pan2810/pimathon_coworklocal.git \
+  --label TRƯỚC --out /tmp/truoc.json --keep /tmp/repo-spec
 
-# sau khi sửa luật, chạy lại với --label "SAU" --out sau.json --keep /tmp/repo-do
-node scripts/measure-matching.mjs --compare truoc.json sau.json
+# SAU: bản hiện tại, DÙNG LẠI đúng bản clone đó
+node scripts/measure-matching.mjs --tickets fixtures/tickets-184-gen.md \
+  --repo https://github.com/Pan2810/pimathon_coworklocal.git \
+  --label SAU --out /tmp/sau.json --keep /tmp/repo-spec
+node scripts/measure-matching.mjs --compare /tmp/truoc.json /tmp/sau.json
 ```
 
-`--keep` bắt buộc dùng chung cho cả hai lần: hai phép đo phải chạy trên **đúng một bản clone
-ở đúng một revision**, nếu không thì chênh lệch đọc được có thể đến từ repo chứ không từ luật.
-Script gọi thẳng thư viện, **không gọi model, không tốn quota**.
+`--keep` dùng chung là bắt buộc: hai phép đo phải chạy trên đúng một bản clone ở đúng một
+revision. Không gọi model, không tốn quota.
 
-## Số đo TRƯỚC
+## Bảng TRƯỚC → SAU
 
-Repo `psf/requests` @ `dae7ef63b4df6eded86637f251fc4e3a06c3b479`, 184 ticket.
+Repo `Pan2810/pimathon_coworklocal` @ `ce9fc6c63cb8d1514564314344b2d3ca14dc2c67`, 184 ticket
+key `GEN-R###` (đúng dạng gây lỗi `gen`), có dòng `PO:/BA:/Developer:` như export Jira thật.
 
-| | |
-|---|---:|
-| Tổng evidence | **920** |
-| Ticket không có evidence | **0** |
-| Số term trung bình mỗi ticket | 6.4 |
+| | TRƯỚC | SAU |
+|---|---:|---:|
+| Tổng evidence | 776 | **459** (−317) |
+| Ticket không có evidence | 0 | **29** (+29) |
+| File bị trích nhiều nhất | `__init__.py` **184× (100%)** | `i18n.py` 101× (55%) |
+| File khác nhau được trích | 5 | 16 |
+| `assets/d3.min.js` | **161×** | **0×** |
+| Ticket có `gen` trong terms | **184** | **0** |
 
-**File bị trích nhiều nhất** — đây là triệu chứng cùng loại với `d3.min.js` 89 lần mà AstraQA đo:
+`code_status`: `done` 184 → 155, `missing` 0 → **29**.
 
-| Số lần | File |
-|---:|---|
-| **184×** | `.github/AI_POLICY.md` |
-| **184×** | `.github/CODEOWNERS` |
-| 158× | `.coveragerc` |
-| 158× | `.git-blame-ignore-revs` |
-| 158× | `.github/CODE_OF_CONDUCT.md` |
-| 26× | `.github/CONTRIBUTING.md` |
+`verdict` (luật [4]): `CODE_AHEAD` 123 → 104 · `MATCH` 61 → 51 · **`JIRA_AHEAD` 0 → 29**.
 
-184× nghĩa là **mọi ticket đều trích cùng một file**. Không file nào trong sáu file trên là
-code; chúng là metadata kho.
+### Ticket đổi verdict: 29/184, tất cả đều theo một hướng
 
-**Từ khoá nào sinh ra evidence** — chỉ có hai, và cả hai đều là rác:
+| Đổi | Số | Ví dụ |
+|---|---:|---|
+| `CODE_AHEAD → JIRA_AHEAD` | 19 | `Management`, `Hold Project KickOff Meeting`, `Sprint planning session`, `Quantum blockchain consensus sharding` |
+| `MATCH → JIRA_AHEAD` | 10 | cùng nhóm trên |
 
-| Số lần | Term | Vì sao là rác |
-|---:|---|---|
-| 474× | `request` | từ chính tên repo/lĩnh vực, khớp mọi nơi |
-| 446× | `pre` | **mảnh của ticket key** `PRE-001`, do `keyParts` tách ra |
+Không ticket nào đi ngược (không có `JIRA_AHEAD → MATCH`). Nhóm lật sang `JIRA_AHEAD` đúng là
+ticket quản trị và ticket vô nghĩa — gồm **cả hai ca thử B và C của spec**.
 
-| | |
-|---|---:|
-| `code_status` | `done` 184 |
-| Verdict theo luật [4] | `CODE_AHEAD` 123 · `MATCH` 61 · **`JIRA_AHEAD` 0** · `NO_EVIDENCE` 0 |
+Số file khác nhau mỗi tiêu đề, bản SAU:
 
-**`JIRA_AHEAD` = 0.** Không ticket nào còn evidence rỗng, nên tín hiệu mà AstraQA cần không
-bao giờ bắn. Đây là hỏng theo hướng ngược với 138 JIRA_AHEAD giả, cùng một gốc: từ khoá rác.
+```
+ 5 file  Cấu hình xác thực người dùng bằng token
+ 5 file  Thêm bộ nhớ đệm cho kết quả tìm kiếm
+ 4 file  Chat panel hiển thị lịch sử hội thoại
+ 3 file  Structure graph view / Folder tab / Model Pricing
+ 1 file  Routing tự động / Attachment validator / Weekly status report
+ 0 file  Management · Sprint planning · KickOff Meeting · Quantum blockchain · (ticket tiếng Nhật)
+```
 
-## Bốn chỗ sẽ sửa
+## Chỉ báo §7
 
-Khoanh sẵn, **chưa đụng vào**. Luật/ngưỡng/stopword sẽ lấy nguyên từ `CANDIDATE_MATCHING_SPEC.md`.
+| Chỉ báo | TRƯỚC | SAU | Đích | |
+|---|---:|---:|---|---|
+| Ticket không có evidence | 0 | 29 | ≥ 2 | ✅ |
+| File bị trích nhiều nhất | 100% | 55% | < 60% | ✅ |
+| `.min.js` bị trích | 161× | 0 | 0 lần | ✅ |
+| `gen` trong terms | 184 | 0 | không bao giờ | ✅ |
+| File khác nhau được trích | 5 | 16 | ≫ 4 (AstraQA 138) | ⚠ |
 
-| # | Vị trí | Sẽ đổi gì |
+⚠ **16 không phải giới hạn của engine mà của fixture:** bộ ticket tổng hợp chỉ có **15 tiêu
+đề khác nhau** lặp lại 184 lần, nên trần trên của "số file khác nhau" bị chính nó chặn. 184
+ticket thật với 184 nội dung khác nhau sẽ trích nhiều file hơn hẳn. Chỉ báo này chỉ đo được
+trên dữ liệu thật.
+
+## Ba ca thử §6 — chạy qua HTTP thật
+
+`POST /api/v1/analyze`, `backend=none`, `ref=ce9fc6c…`. `files_scanned = 154` ở cả ba,
+khớp đúng con số spec nêu.
+
+| Ca | Kỳ vọng | Kết quả |
 |---|---|---|
-| 1 | `lib/repoContext.mjs` — `keywordsOf()` | Bỏ `keyParts` (chỉ giữ key nguyên văn). Lọc dòng metadata (`Status:` / `Trạng thái:` …) khỏi `body` trước khi tách token. Thay `STOPWORDS` theo spec. |
-| 2 | `lib/repoContext.mjs` — `SKIP_DIRS` / `BINARY_EXT` | Thêm luật loại file minified/vendor (`*.min.js`, `*.min.css`, bundle …). |
-| 3 | `lib/repoContext.mjs` — `walk()`, nhánh `e.isFile()` | Chỗ áp bộ lọc file ở trên. |
-| 4 | `lib/noneJudge.mjs` — vòng chọn evidence | Ngưỡng độ phủ: một file chỉ thành evidence khi chia sẻ **nhiều hơn một** term. Hiện tại một term trùng là đủ. |
+| **A** `GEN-R169` | khớp, `core/model_pricing.py` đứng đầu | ✅ `done` — `core/model_pricing.py:1`, `core/usage_tracker.py:68`, `config.py:96` |
+| **B** `GEN-R999` | shortlist **rỗng** | ✅ `missing`, `evidence: []`, terms `[implement, zero, knowledge, validator]` |
+| **C** `COWORKLOCAL-1` | shortlist **rỗng** | ✅ `missing`, `evidence: []`, terms `[management]` |
 
-Ghi chú cho [1]: `ticket.body` hiện chứa **cả** dòng `Status: Done` (xem `lib/tickets.mjs`,
-`fromHeadings()` — `body: bodyLines.join('\n')`), dù `ticket.status` đã được tách riêng. Đó là
-đường mà `status` và `done` lọt vào từ khoá.
+Tách từ khớp **nguyên văn** kỳ vọng của spec: ca A 10 term thô → 9 sau lọc (bỏ đúng `model`);
+ca B 10 → 4 đúng `implement knowledge validator zero`; ca C 1 `management`.
 
-## Một điều lệch cần biết trước khi đọc bảng SAU
+## §5 — đã chọn `rare_term`, và vì sao
 
-`code_status` do `judgeWithoutModel()` quyết **trước** khi `keepRealEvidence()` lọc bỏ đường
-dẫn không có thật. Với backend `none` thì hai bước luôn khớp vì đường dẫn đến từ chính phép
-quét. Nhưng với `fci`, một model chỉ trích đường dẫn bịa sẽ cho ra `code_status: "done"` kèm
-`evidence: []`. Cặp đó vô lý khi đọc riêng. Luật [4] không bị ảnh hưởng (backend `fci` có
-`scan: null` → `NO_EVIDENCE`, không bao giờ `JIRA_AHEAD`), nên chưa sửa — nhưng đừng đọc
-`done` của backend `fci` mà bỏ qua `evidence`.
+Spec đưa ba cách siết chặt cho `backend=none` (vì nó không có judge dọn sau) và bảo dùng ca B
+để chọn. Đo cả bốn trên đúng repo/commit spec nêu:
+
+| Chế độ | Ca A | Ca B | Ca C | Recall khi ticket khớp vừa đúng 2 term |
+|---|---|---|---|---|
+| `none` (y hệt AstraQA) | ✅ | ❌ lọt `ui/cowork_tab.py` | ✅ | 40/40 |
+| `min_terms_3` | ✅ | ✅ | ✅ | **0/40** ← vực thẳm |
+| **`rare_term`** ← chọn | ✅ | ✅ | ✅ | **40/40** |
+| `coverage` | ✅ | ❌ lọt `ui/cowork_tab.py` | ✅ | 40/40 |
+
+Hai chế độ `none` và `coverage` **trượt ca B** — đúng cái false positive mà spec §5 nói
+AstraQA được judge cứu còn `none` thì không.
+
+Còn lại hai chế độ đều 3/3 trên ca thử. Phân định bằng recall: mỗi ticket giả lập dựng từ các
+định danh đặc trưng nhất của một file có thật, đo ở đúng ranh giới 2/3/4 term khớp.
+
+- `min_terms_3`: ticket khớp **vừa đúng 2** term đặc trưng → **0/40**. Một vực thẳm: mọi
+  ticket ngắn mà khớp đúng hai từ hiếm đều mất trắng.
+- `rare_term`: **40/40** ở cả ba mức 2, 3 và 4 term. Nó chỉ giết match mà term tốt nhất vẫn
+  là từ phổ biến — đúng trường hợp `zero` + `knowledge` của ca B.
+
+Nên `rare_term`: đạt cả ba ca thử mà không đánh đổi recall ở bất kỳ mức nào. Ngưỡng tính theo
+`N` (`weight(floor(0.05·N))`) chứ không hardcode 3.14, đúng như spec dặn.
+
+Giá trị nằm ở `TIGHTEN_MODE` cuối `lib/candidates.mjs`, có test khoá.
+
+## Hai chỗ LỆCH spec — cần AstraQA xác nhận
+
+**1. Regex ticket key của spec loại chính ví dụ của spec.** §1.3 viết
+`^[A-Za-z][A-Za-z0-9]*-\d+$` nhưng liệt kê `GEN-R169` là hợp lệ. `R169` không phải `\d+`:
+
+```
+GEN-R169         regex khớp? KHÔNG  ← mâu thuẫn
+COWORKLOCAL-14   regex khớp? CÓ
+PRE-001          regex khớp? CÓ
+```
+
+`GEN-R###` là dạng key thật của dữ liệu và là ca thử A lẫn B, nên cài theo **ví dụ**: phần sau
+dấu `-` phải có ít nhất một chữ số (`^[A-Za-z][A-Za-z0-9]*-[A-Za-z0-9]*\d[A-Za-z0-9]*$`).
+Không nới thành `[A-Za-z0-9]+` vì khi đó mọi từ ghép có gạch nối (`auto-routing`) sẽ thành
+"ticket key".
+
+**2. 154 file — suy ra từ việc bỏ file rỗng.** Index thô cho 155; repo có đúng 155 file `.py`
+và đúng một file rỗng (`tests/routing/__init__.py`). Bỏ file không có token nào cho **đúng
+154**. File rỗng không bao giờ khớp được nên đếm nó vào `files_scanned` là khai khống. Nếu
+AstraQA loại nó bằng luật khác (ví dụ bỏ cả `tests/`) thì sửa ở `buildIndex`.
+
+## Một quan sát, chưa sửa
+
+Với ticket tiếng Việt, âm tiết 3 ký tự thành từ khoá và nhiễu nặng: `thu`, `muc`, `qua`,
+`cau`, `dung`, `ket`, `thi`, `hien` là tám term sinh ra nhiều evidence nhất ở bản SAU.
+Stopword tiếng Việt của spec (§2.1) có 10 từ và không phủ nhóm này. **Chưa thêm gì** — thêm
+stopword là lệch spec, và phải do AstraQA quyết để hai bên còn so được.
+
+## Còn thiếu
+
+**File `tickets_md` thật + repo/ref thật của AstraQA.** Có nó là chạy lại đúng hai lệnh ở trên
+rồi ra thẳng bảng §7. Không có nó thì mọi con số ở đây chỉ chứng minh engine hành xử đúng
+luật, không chứng minh được nó khớp engine nội bộ.

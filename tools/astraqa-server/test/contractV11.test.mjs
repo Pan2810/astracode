@@ -24,7 +24,8 @@ import { promisify } from 'node:util';
 import { pathToFileURL } from 'node:url';
 import { createServer } from '../server.mjs';
 import { judgeWithoutModel } from '../lib/noneJudge.mjs';
-import { buildRepoContext } from '../lib/repoContext.mjs';
+import { buildIndex, queryTerms, discriminating } from '../lib/candidates.mjs';
+import { matchesAny } from '../lib/globs.mjs';
 
 const run = promisify(execFile);
 const TOKEN = 'service-token-v11-0123456789';
@@ -40,16 +41,23 @@ before(async () => {
   tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'astraqa-v11-'));
   repoDir = path.join(tmp, 'repo');
   await fs.mkdir(path.join(repoDir, 'src'), { recursive: true });
-  await fs.writeFile(path.join(repoDir, 'src', 'login.py'), 'def login(user):\n    """man hinh dang nhap"""\n    return True\n');
-  await fs.writeFile(path.join(repoDir, 'src', 'cache.py'), 'CACHE = {}\n\n\ndef cache_get(k):\n    return CACHE.get(k)\n');
-  await fs.writeFile(path.join(repoDir, 'README.md'), '# demo\n\nWEB-1001 lam o src/login.py\n');
+  // Ðủ file mã nguồn để document_frequency có nghĩa (§4.2). `README.md` cố ý
+  // KHÔNG còn: §3.1 dùng allowlist đuôi mã nguồn nên tài liệu không được quét.
+  await fs.writeFile(
+    path.join(repoDir, 'src', 'login.py'),
+    'import hashlib\n\n\ndef authenticate(username, password):\n    """man hinh dang nhap"""\n    return hashlib.sha256(password.encode()).hexdigest()\n',
+  );
+  await fs.writeFile(path.join(repoDir, 'src', 'cache.py'), 'CACHE = {}\n\n\ndef cache_lookup(key):\n    return CACHE.get(key)\n');
+  await fs.writeFile(path.join(repoDir, 'src', 'billing.py'), 'def invoice_total(items):\n    return sum(i.amount for i in items)\n');
+  await fs.writeFile(path.join(repoDir, 'src', 'report.py'), 'def render_report(rows):\n    return len(rows)\n');
+  await fs.writeFile(path.join(repoDir, 'src', 'upload.py'), 'def store_attachment(blob):\n    return len(blob)\n');
+  await fs.writeFile(path.join(repoDir, 'src', 'router.py'), 'ROUTES = {}\n\n\ndef dispatch(route):\n    return ROUTES.get(route)\n');
   // Thư mục để kiểm `files_scanned` đếm SAU khi áp exclude_globs. Cố ý KHÔNG đặt
-  // tên `dist`: `repoContext` có SKIP_DIRS cứng (.git, node_modules, .venv,
-  // __pycache__, dist, build, .next, vendor) luôn bị bỏ bất kể exclude_globs, nên
-  // `dist` sẽ không đo được tác dụng của glob.
+  // tên `dist`/`build`/`vendor`: §3.1 có danh sách thư mục loại cứng, luôn bị bỏ
+  // bất kể exclude_globs, nên các tên đó không đo được tác dụng của glob.
   await fs.mkdir(path.join(repoDir, 'generated'), { recursive: true });
   for (let i = 0; i < 5; i++) {
-    await fs.writeFile(path.join(repoDir, 'generated', `bundle${i}.js`), 'console.log("login cache")\n');
+    await fs.writeFile(path.join(repoDir, 'generated', `helper${i}.js`), `export function helper${i}(x) {\n  return x + ${i};\n}\n`);
   }
   await run('git', ['init', '-q', '-b', 'main'], { cwd: repoDir });
   await run('git', ['add', '-A'], { cwd: repoDir });
@@ -99,8 +107,14 @@ async function analyze(body) {
   throw new Error('job không kết thúc');
 }
 
+/**
+ * Ticket thứ hai cố ý dùng hai từ ÐỀU CÓ trong repo nhưng nằm ở hai file khác
+ * nhau (`invoice` ở billing.py, `attachment` ở upload.py). Nhờ vậy `scan.terms`
+ * không rỗng — chứng minh phép quét đã chạy thật — mà không file nào đạt sàn
+ * `_MIN_TERMS = 2`, nên shortlist rỗng. Ðó đúng là hình dạng một dòng JIRA_AHEAD.
+ */
 const HAI_TICKET =
-  '## WEB-1001 — them man hinh dang nhap\n\nStatus: Done\n\n## ZZZ-999 — viec khong ai lam bao gio\n\nStatus: To Do';
+  '## WEB-1001 — authenticate password hashing\n\nStatus: Done\n\n## ZZZ-999 — invoice attachment\n\nStatus: To Do';
 
 test('[1] result.source_revision là SHA đầy đủ của commit đã clone', async () => {
   const done = await analyze({ run_id: 'V11-REV', repo_url: repoUrl, tickets_md: HAI_TICKET });
@@ -137,46 +151,82 @@ test('[2] MỌI item có field scan — kể cả item evidence rỗng', async (
     'ZZZ-999 phải thoả đúng ba điều kiện JIRA_AHEAD');
 });
 
-test('[2] scan.terms là từ khoá THẬT đã dùng, không phải danh sách dựng lại', async () => {
-  const ticket = { key: 'WEB-1001', title: 'them man hinh dang nhap', body: '' };
-  const ctx = await buildRepoContext({ repoDir, ticket, excludeGlobs: ['**/generated/**'], maxSnippets: 60 });
-  const r = await judgeWithoutModel({ ticket, options: { exclude_globs: ['**/generated/**'], max_files_per_ticket: 5 }, repoDir });
+test('[2] scan.terms là term THẬT sau mọi bộ lọc, không phải mọi từ trong ticket', async () => {
+  const ticket = {
+    key: 'WEB-1001',
+    title: 'authenticate password hashing',
+    body: ['Status: Done', 'PO: NguyenVanA'].join('\n'),
+  };
+  const index = await buildIndex({ repoDir, fs, path, excludeGlobs: ['**/generated/**'], matchesAny });
+  const r = await judgeWithoutModel({ ticket, options: { max_files_per_ticket: 5 }, index });
 
-  // Cùng một mảng mà `buildRepoContext` dùng để dò từng dòng — không phải bản sao gần đúng.
-  assert.deepEqual(r.scan.terms, ctx.keywords);
-  assert.ok(r.scan.terms.includes('web-1001'), 'phải có key nguyên văn');
-  // Và mọi từ khoá trong evidence phải nằm trong danh sách đã khai.
-  for (const ev of r.items[0].evidence) {
-    const dung = /khớp từ khoá "([^"]+)"/.exec(ev.note)?.[1];
-    assert.ok(r.scan.terms.includes(dung), `từ khoá "${dung}" không có trong scan.terms`);
+  const { terms: sauLoc } = discriminating(queryTerms(ticket), index.df, index.N);
+  // Ðúng tập term mà `shortlistFor` dùng để chấm — không phải bản sao gần đúng.
+  assert.deepEqual(r.scan.terms, sauLoc);
+
+  // §1.1 — siêu dữ liệu quản trị KHÔNG được thành từ khoá.
+  for (const rac of ['status', 'done']) {
+    assert.ok(!r.scan.terms.includes(rac), `"${rac}" là metadata, không được vào terms`);
   }
+  // §1.2 — tên người trong dòng `PO:` cũng vậy.
+  assert.ok(!r.scan.terms.includes('nguyenvana'), 'tên người không được thành từ khoá');
+  // §1.3 — mảnh của ticket key không bao giờ được lọt vào.
+  assert.ok(!r.scan.terms.includes('web'), 'mảnh của ticket key không được vào terms');
 });
 
 test('[2] files_scanned đếm SAU khi áp exclude_globs', async () => {
+  const ticket = { key: 'CACHE-1', title: 'cache lookup', body: '' };
   const opts = { max_files_per_ticket: 5 };
-  const ticket = { key: 'CACHE-1', title: 'cache login', body: '' };
 
-  const loai = await judgeWithoutModel({ ticket, options: { ...opts, exclude_globs: ['**/generated/**'] }, repoDir });
-  const giu = await judgeWithoutModel({ ticket, options: { ...opts, exclude_globs: [] }, repoDir });
+  const idxLoai = await buildIndex({ repoDir, fs, path, excludeGlobs: ['**/generated/**'], matchesAny });
+  const idxGiu = await buildIndex({ repoDir, fs, path, excludeGlobs: [], matchesAny });
+  const loai = await judgeWithoutModel({ ticket, options: opts, index: idxLoai });
+  const giu = await judgeWithoutModel({ ticket, options: opts, index: idxGiu });
 
-  // repo có 3 file nguồn + 5 file trong generated/.
-  assert.equal(loai.scan.files_scanned, 3, 'loại generated/ thì chỉ còn 3 file');
-  assert.equal(giu.scan.files_scanned, 8, 'giữ generated/ thì đếm cả 5 file kia');
-  assert.ok(giu.scan.files_scanned > loai.scan.files_scanned);
+  // repo có 6 file .py + 5 file .js trong generated/ (cả hai đuôi đều nằm trong
+  // allowlist §3.1, nên chênh lệch đúng là do glob chứ không do đuôi file).
+  assert.equal(loai.scan.files_scanned, 6, 'loại generated/ thì chỉ còn 6 file .py');
+  assert.equal(giu.scan.files_scanned, 11, 'giữ generated/ thì đếm cả 5 file .js kia');
 });
 
-test('[2] files_scanned là số file ÐÃ MỞ, không phải số file ứng viên', async () => {
-  // `maxSnippets` làm vòng quét dừng sớm; con số phải phản ánh thực tế đó chứ
-  // không phải kích thước corpus.
+test('[2] files_scanned là TOÀN BỘ corpus đã lọc — không dừng sớm giữa chừng', async () => {
+  // Bản trước dừng quét khi đủ `maxSnippets`, nên `files_scanned` phụ thuộc
+  // ticket. Từ khi theo CANDIDATE_MATCHING_SPEC, index đọc hết corpus một lần và
+  // `document_frequency` mới có nghĩa — `files_scanned` vì thế là một con số của
+  // REPO, giống nhau cho mọi ticket. Spec §6 ca C trông cậy đúng vào điều này
+  // (`files_scanned: 154` cho một ticket không khớp gì cả).
   const nhieu = path.join(tmp, 'repo-nhieu');
   await fs.mkdir(nhieu, { recursive: true });
-  for (let i = 0; i < 40; i++) await fs.writeFile(path.join(nhieu, `f${i}.txt`), 'login login login\n'.repeat(5));
+  for (let i = 0; i < 40; i++) {
+    await fs.writeFile(path.join(nhieu, `mod${i}.py`), `def handler_${i}(payload):\n    return payload\n`);
+  }
+  const index = await buildIndex({ repoDir: nhieu, fs, path, excludeGlobs: [], matchesAny });
+  assert.equal(index.N, 40, 'phải đọc hết 40 file, không dừng sớm');
 
-  const ctx = await buildRepoContext({ repoDir: nhieu, ticket: { key: 'K-1', title: 'login' }, excludeGlobs: [], maxSnippets: 10 });
-  assert.equal(ctx.totalFiles, 40, 'có 40 file ứng viên');
-  assert.ok(ctx.scannedFiles < 40, `dừng sớm thì scannedFiles phải nhỏ hơn 40, nhận ${ctx.scannedFiles}`);
-  assert.ok(ctx.scannedFiles > 0);
-  assert.equal(ctx.scanTruncated, true);
+  // Cùng một index → mọi ticket khai cùng một `files_scanned`, kể cả ticket
+  // khớp nhiều lẫn ticket không khớp gì.
+  const khop = await judgeWithoutModel({ ticket: { key: 'K-1', title: 'handler payload' }, options: {}, index });
+  const truot = await judgeWithoutModel({ ticket: { key: 'K-2', title: 'quantum blockchain sharding' }, options: {}, index });
+  assert.equal(khop.scan.files_scanned, 40);
+  assert.equal(truot.scan.files_scanned, 40);
+  assert.deepEqual(truot.items[0].evidence, [], 'ticket không liên quan phải cho shortlist rỗng');
+});
+
+test('[2] file tài liệu, minified và generated KHÔNG được vào corpus (§3.1, §3.3)', async () => {
+  const loc = path.join(tmp, 'repo-loc');
+  await fs.mkdir(path.join(loc, 'assets'), { recursive: true });
+  await fs.writeFile(path.join(loc, 'thuc.py'), 'def handler(payload):\n    return payload\n');
+  // Tài liệu: ngoài allowlist đuôi.
+  await fs.writeFile(path.join(loc, 'README.md'), '# handler payload\n');
+  await fs.writeFile(path.join(loc, 'notes.txt'), 'handler payload\n');
+  // Minified: khớp marker trong tên file.
+  await fs.writeFile(path.join(loc, 'assets', 'd3.min.js'), 'var handler=function(payload){return payload}\n');
+  // Generated: tên bình thường nhưng dòng dài — bắt bằng §3.3.
+  await fs.writeFile(path.join(loc, 'assets', 'bundle_lon.js'), `var x=${'"handler payload",'.repeat(400)}0;\n`);
+
+  const index = await buildIndex({ repoDir: loc, fs, path, excludeGlobs: [], matchesAny });
+  assert.deepEqual(index.files.map((f) => f.path), ['thuc.py'], `corpus lạ: ${index.files.map((f) => f.path)}`);
+  assert.equal(index.N, 1);
 });
 
 test('[3] có evidence → done 0.25; không evidence nhưng đã quét → missing kèm scan', async () => {
