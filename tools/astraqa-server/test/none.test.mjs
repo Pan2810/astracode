@@ -132,7 +132,9 @@ test('chạy trọn job mà không có key/JWT/CLI nào', async () => {
 test('"done" của backend none là "source có code", không phải "đã làm đầy đủ"', async () => {
   // Ticket phải có ÍT NHẤT hai term đặc trưng: §4.1 đặt sàn `_MIN_TERMS = 2`, nên
   // một từ lặp lại ba lần vẫn chỉ là một term và cho shortlist rỗng (đúng như ca C).
-  const done = await analyze({ repo_url: repoUrl, tickets_md: '## AUTH-7 — authenticate password hashing' });
+  // Ba term đặc trưng, không phải hai: `min_terms_3` đòi ít nhất 3 term chung
+  // giữa ticket và file. Cả ba đều có thật trong `src/login.py`.
+  const done = await analyze({ repo_url: repoUrl, tickets_md: '## AUTH-7 — authenticate password username' });
   assert.equal(done.status, 'succeeded', done.error);
   const it = done.result.items[0];
   assert.equal(it.code_status, 'done');

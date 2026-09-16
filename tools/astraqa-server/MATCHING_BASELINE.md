@@ -265,3 +265,82 @@ Gateway `https://token-api.fpt.ai/v1`, 3 ticket đầu của file thật:
 
 **Model KHÔNG trả kèm suy luận trước JSON** — gọi thẳng để xem văn bản thô: khối ```json bắt
 đầu ngay vị trí 0. Không cần `ASTRACODE_JUDGE_EXTRA_BODY`, **không phải đổi sang Qwen3.8-27B**.
+
+
+---
+
+# Matcher ÐÓNG BĂNG — 2026-09-16
+
+AstraQA đã chốt ba câu. Áp xong, còn đúng một thứ mở: `TIGHTEN_MODE`.
+
+## Ba quyết định đã áp
+
+**[1] Regex ticket key** — `^[A-Z][A-Z0-9]{1,19}-[A-Z]{0,2}\d{1,6}$`, áp trên chuỗi GỐC
+trước khi casefold. **Chữ HOA mới là thứ chặn**, không phải việc siết ký tự. Bản "ít nhất một
+chữ số" của tôi dính đủ 11 bẫy; regex chốt bắt 0/11:
+
+```
+utf-8  sha-256  covid-19  base-64  md-5  http-2  es-2015  gpt-4  x-11  iso-8601  rfc-7231
+```
+
+Ðo lại: **184/184 key thật nhận dạng được, 0 dương tính giả.**
+
+**[2] 154 file** — loại file rỗng theo NỘI DUNG (`!text.trim()`), không theo ngưỡng kích
+thước. Ðo lại: `N = 154`. Khác với "0 token" ở chỗ một file chỉ gồm dấu câu vẫn đã được quét
+nên vẫn phải đếm.
+
+**[3] ÁP §1.2**, nhãn: `PO BA QA Dev Developer Tester Reporter Assignee Owner Status Priority
+Ghi chú Ngày nhận` (bắt cả dạng không dấu — cùng một trường, khác cách gõ). Cộng với
+`STRUCTURE_LINE` bỏ khung markdown. `GEN-R305` giờ ra `terms: []` — sạch hết `ngay`, `nhan`,
+`ghi`, `chu`, `46244`, `nampdt`, `status`, `progress`, `description`.
+
+Chưa thêm stopword tiếng Việt, theo quyết định.
+
+## Bảng verdict bốn chế độ siết — 184 ticket THẬT, sau khi áp §1.2
+
+`node scripts/tighten-table.mjs --keep <clone>`
+
+| chế độ | MATCH | CODE_AHEAD | JIRA_AHEAD | NO_EV | khớp | lệch | ca B |
+|---|---:|---:|---:|---:|---:|---:|---|
+| **ÐÍCH (AstraQA)** | **138** | **44** | **2** | **0** | 184/184 | 0 | — |
+| `none` | 136 | 43 | 5 | 0 | **181/184** | 3 | ❌ |
+| `coverage` | 135 | 41 | 8 | 0 | 178/184 | 6 | ❌ |
+| `min_terms_3` | 122 | 37 | 25 | 0 | **161/184** | 23 | ✅ |
+| `rare_term` | 98 | 38 | 48 | 0 | 138/184 | 46 | ✅ |
+
+Ca thử B là điều kiện CẦN → chỉ `min_terms_3` và `rare_term` đủ tư cách. Trong hai cái đó
+`min_terms_3` hơn hẳn (161 so với 138), nên **`TIGHTEN_MODE` tạm để `min_terms_3`** — chờ bảng
+song song của AstraQA rồi chốt.
+
+**Ba ticket lệch của `none`**, tất cả cùng một hướng (không bao giờ khẳng định nhiều hơn AstraQA):
+
+```
+GEN-R283  App Batch — Batch processing for multiple op   MATCH      → JIRA_AHEAD
+GEN-R303  Perfomance update                              MATCH      → JIRA_AHEAD
+GEN-R305  Update UI/UX                                   CODE_AHEAD → JIRA_AHEAD
+```
+
+Cả ba đều là ticket mà AstraQA tìm ra evidence nhờ tên người — đúng thứ §1.2 vừa cắt. Ðây là
+hệ quả đã lường trước của quyết định [3], không phải lỗi mới.
+
+## Hai dòng JIRA_AHEAD thật — CÒN NGUYÊN ở cả bốn chế độ
+
+```
+COWORKLOCAL-1 — "Management"                          (jira: done)
+  terms thô(1): [management]      sau lọc(1): [management]
+  none · rare_term · min_terms_3 · coverage  →  JIRA_AHEAD ở cả bốn
+
+COWORKLOCAL-2 — "[Planning Task] Resource Allocation"  (jira: done)
+  terms thô(5): [resource, allocation, allocate, member, fi2]
+  sau lọc(2):   [resource, member]
+  none · rare_term · min_terms_3 · coverage  →  JIRA_AHEAD ở cả bốn
+```
+
+Hai dòng này là cả lý do hợp đồng v1.1 sinh ra, và chúng không phụ thuộc lựa chọn chế độ siết.
+
+## Ðánh đổi đã biết của `min_terms_3`
+
+Recall probe (ticket giả lập khớp vừa đúng 2 term đặc trưng) cho `min_terms_3` **0/40**. Con
+số ấy là thật nhưng probe đó thiên lệch — nó dựng ticket từ term hiếm nhất của file đích. Trên
+dữ liệu thật `min_terms_3` khớp 161/184, tức đánh đổi nhỏ hơn probe gợi ý nhiều. Vẫn nên biết
+rằng ticket ngắn khớp đúng hai từ sẽ mất.

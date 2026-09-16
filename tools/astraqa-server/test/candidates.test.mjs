@@ -186,7 +186,15 @@ test('§4.1 — sàn 2 term áp cả ở phía ticket lẫn phía từng file', 
 
 test('§5 — chế độ siết đang dùng đã được ghi rõ', () => {
   assert.ok(['none', 'min_terms_3', 'rare_term', 'coverage'].includes(TIGHTEN_MODE));
-  // Chốt bằng ca thử B (xem MATCHING_BASELINE.md); đổi giá trị này là đổi hành vi
-  // nghiệm thu, nên nó phải đi kèm số đo mới.
-  assert.equal(TIGHTEN_MODE, 'rare_term');
+  /**
+   * TẠM THỜI, chưa phải quyết định cuối — AstraQA đang đo bảng song song.
+   *
+   * `rare_term` đã bị bỏ: nó hiệu chỉnh trên probe hỏng và chỉ khớp 138/184 trên
+   * dữ liệu thật. Trong hai chế độ còn ĐẠT ca thử B (điều kiện cần),
+   * `min_terms_3` đo tốt hơn hẳn: 161/184.
+   *
+   * Ðổi giá trị này là đổi bảng nghiệm thu, nên phải đi kèm số đo mới —
+   * `node scripts/tighten-table.mjs --keep <clone>`.
+   */
+  assert.equal(TIGHTEN_MODE, 'min_terms_3');
 });

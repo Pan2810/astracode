@@ -114,7 +114,7 @@ async function analyze(body) {
  * `_MIN_TERMS = 2`, nên shortlist rỗng. Ðó đúng là hình dạng một dòng JIRA_AHEAD.
  */
 const HAI_TICKET =
-  '## WEB-1001 — authenticate password hashing\n\nStatus: Done\n\n## ZZZ-999 — invoice attachment\n\nStatus: To Do';
+  '## WEB-1001 — authenticate password username\n\nStatus: Done\n\n## ZZZ-999 — invoice attachment\n\nStatus: To Do';
 
 test('[1] result.source_revision là SHA đầy đủ của commit đã clone', async () => {
   const done = await analyze({ run_id: 'V11-REV', repo_url: repoUrl, tickets_md: HAI_TICKET });

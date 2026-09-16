@@ -59,7 +59,7 @@ export const STOPWORDS = new Set([...STOPWORDS_BASE, ...STOPWORDS_EXTRA]);
 
 /** §1.2 — dòng metadata bị nhét vào description của export Jira. Loại trước khi tách từ. */
 export const METADATA_LINE =
-  /^\s*(PO|BA|QA|Dev|Developer|Tester|Reporter|Assignee|Owner|Status|Priority)\s*:/i;
+  /^\s*(PO|BA|QA|Dev|Developer|Tester|Reporter|Assignee|Owner|Status|Priority|Ghi ch[úu]|Ng[àa]y nh[ậa]n)\s*:/i;
 
 /**
  * Cấu trúc markdown của `tickets_md`, KHÔNG phải nội dung ticket.
@@ -78,19 +78,17 @@ export const STRUCTURE_LINE = /^\s*(?:[-*+]\s*[A-Za-z_][\w \t]{0,30}:\s*|#{1,6}\
 /**
  * §1.3 — hình dạng ticket key. Khớp nguyên chuỗi, KHÔNG BAO GIỜ tách mảnh.
  *
- * ⚠ LỆCH SPEC CÓ CHỦ Ý — cần AstraQA xác nhận.
+ * Chốt bởi AstraQA 2026-09-16: 184/184 key thật, 0 dương tính giả.
  *
- * Spec viết regex `^[A-Za-z][A-Za-z0-9]*-\d+$` nhưng ngay dòng dưới liệt kê
- * `GEN-R169` là ví dụ hợp lệ. Hai thứ đó mâu thuẫn: `R169` không phải `\d+`, nên
- * regex nguyên văn LOẠI chính `GEN-R169` — mà đó lại là dạng key thật của dữ
- * liệu (`GEN-R###`), và là ca thử A lẫn B của §6.
+ * Chữ HOA mới là thứ chặn, không phải việc siết ký tự. Bản trước của tôi chỉ đòi
+ * "có ít nhất một chữ số sau dấu gạch" và dính đủ 11 bẫy đo được:
+ * `utf-8`, `sha-256`, `covid-19`, `base-64`, `md-5`, `http-2`, `es-2015`,
+ * `gpt-4`, `x-11`, `iso-8601`, `rfc-7231`. Regex dưới đây bắt 0/11.
  *
- * Theo ví dụ chứ không theo regex, vì ví dụ mới là sự thật về dữ liệu: yêu cầu
- * phần sau dấu `-` có ÍT NHẤT MỘT CHỮ SỐ. Nhờ vậy `GEN-R169`, `COWORKLOCAL-14`,
- * `PRE-001` đều hợp lệ, còn `auto-routing` thì không (nếu nới thành
- * `[A-Za-z0-9]+` thì mọi từ ghép có gạch nối sẽ thành "ticket key").
+ * Áp trên chuỗi GỐC, TRƯỚC khi casefold — casefold xong thì không còn phân biệt
+ * hoa thường nữa và cả 11 bẫy kia quay lại.
  */
-export const TICKET_KEY = /^[A-Za-z][A-Za-z0-9]*-[A-Za-z0-9]*\d[A-Za-z0-9]*$/;
+export const TICKET_KEY = /^[A-Z][A-Z0-9]{1,19}-[A-Z]{0,2}\d{1,6}$/;
 
 // ── Chuẩn hoá và tách từ (spec §1.4 – §1.7) ────────────────────────────────
 
@@ -308,17 +306,18 @@ export async function buildIndex({ repoDir, fs, path, excludeGlobs = [], matches
       } catch {
         continue;
       }
-      if (text.includes(' ')) continue;
+      if (text.includes('\u0000')) continue;
       if (isGenerated(text)) continue;
 
-      const tokens = fileTokens(text);
-      // File không có token nào (thường là `__init__.py` rỗng) không bao giờ khớp
-      // được, nên đếm nó vào `files_scanned` là khai khống phép quét.
+      // File rỗng bị loại theo NỘI DUNG, không theo ngưỡng kích thước — AstraQA
+      // xác nhận 2026-09-16 rằng đó là luật của họ, và đó là chỗ 155 thành 154.
       //
-      // SUY RA, chưa xác nhận với AstraQA: repo demo có đúng 155 file `.py`, đúng
-      // một file rỗng, và spec §6 nói 154. Bỏ file rỗng là khớp chính xác. Nếu
-      // AstraQA loại nó bằng luật khác (ví dụ bỏ cả `tests/`) thì sửa ở đây.
-      if (tokens.size === 0) continue;
+      // Loại theo nội dung chứ không theo "0 token" là có khác biệt: một file chỉ
+      // gồm dấu câu có nội dung thật nhưng không sinh token nào; nó vẫn đã được
+      // quét, nên vẫn phải đếm.
+      if (!text.trim()) continue;
+
+      const tokens = fileTokens(text);
       for (const t of tokens) df.set(t, (df.get(t) ?? 0) + 1);
       files.push({ path: rel, tokens, text, folded: fold(text) });
     }
@@ -393,7 +392,19 @@ export function firstLineWith(index, relPath, terms) {
 }
 
 /**
- * §5 — lựa chọn siết chặt đang dùng cho `backend=none`.
- * Giá trị này được chốt bằng ca thử B; số đo nằm trong MATCHING_BASELINE.md.
+ * §5 — lựa chọn siết chặt cho `backend=none`.
+ *
+ * TẠM THỜI, chưa phải quyết định cuối: AstraQA đang đo một bảng song song và sẽ
+ * chốt sau khi có cả hai.
+ *
+ * `rare_term` (lựa chọn trước) đã bị bỏ — nó được hiệu chỉnh trên một probe hỏng
+ * (ticket giả lập dựng từ chính term hiếm nhất của file đích, nên luôn có sẵn một
+ * term hiếm và chế độ này không bao giờ bị phạt). Trên 184 ticket thật nó chỉ khớp
+ * 138/184.
+ *
+ * Ca thử B vẫn là điều kiện CẦN, và chỉ hai chế độ đạt nó: `min_terms_3` (161/184)
+ * và `rare_term` (138/184). Nên tạm dùng `min_terms_3`.
+ *
+ * Bảng đầy đủ: `node scripts/tighten-table.mjs --keep <clone>`.
  */
-export const TIGHTEN_MODE = 'rare_term';
+export const TIGHTEN_MODE = 'min_terms_3';
