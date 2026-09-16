@@ -130,6 +130,15 @@ export function bannerLines(config, { runsDir, devMode }) {
   if (config.judgeBackend === 'fci') {
     lines.push(`  FPT_BASE_URL  : ${config.fciBaseUrl || '(chưa đặt)'}`);
     lines.push(`  FPT_API_KEY   : ${yn(config.fciApiKey)}`);
+    // Khai TÊN field, không khai giá trị — extra body là do người dùng đặt và
+    // có thể chứa thứ không nên in ra console.
+    lines.push(
+      `  EXTRA_BODY    : ${
+        config.fciExtraBody
+          ? `có, ${Object.keys(config.fciExtraBody).length} field: ${Object.keys(config.fciExtraBody).join(', ')}`
+          : '(rỗng)'
+      }`,
+    );
   } else if (config.judgeBackend === 'cli') {
     lines.push(`  ASTRACODE_CLI : ${config.cliPath}`);
     lines.push(`  ASTRAWORK_JWT : ${yn(config.astraworkJwt)}`);

@@ -62,6 +62,20 @@ export const METADATA_LINE =
   /^\s*(PO|BA|QA|Dev|Developer|Tester|Reporter|Assignee|Owner|Status|Priority)\s*:/i;
 
 /**
+ * Cấu trúc markdown của `tickets_md`, KHÔNG phải nội dung ticket.
+ *
+ * `ticket.body` mà `tickets.mjs` trả về là khối markdown thô, gồm cả dòng field
+ * (`- summary: …`, `- status: …`) lẫn heading (`### description`). Ðể nguyên thì
+ * §1.1 bị vi phạm ngay: `status` lọt vào từ khoá và mọi ticket cùng khớp
+ * `in_progress`, còn chữ "description" của cái heading thành từ khoá cho CẢ 184
+ * ticket (đo được 216 lần trích trên dữ liệu thật).
+ *
+ * §1.1 nói rõ chỉ dùng `summary` + `description` — là GIÁ TRỊ của hai trường,
+ * không phải khung markdown bọc quanh chúng.
+ */
+export const STRUCTURE_LINE = /^\s*(?:[-*+]\s*[A-Za-z_][\w \t]{0,30}:\s*|#{1,6}\s)/;
+
+/**
  * §1.3 — hình dạng ticket key. Khớp nguyên chuỗi, KHÔNG BAO GIỜ tách mảnh.
  *
  * ⚠ LỆCH SPEC CÓ CHỦ Ý — cần AstraQA xác nhận.
@@ -157,7 +171,10 @@ export function queryTerms(ticket) {
   const summary = String(ticket.title ?? '');
   const description = String(ticket.body ?? '')
     .split(/\r?\n/)
-    .filter((d) => !METADATA_LINE.test(d))
+    // Bỏ khung markdown (dòng field, heading) rồi mới bỏ dòng metadata. Thiếu
+    // bước đầu là `status` lọt vào bằng đường `- status: in_progress`, đúng thứ
+    // §1.1 cấm.
+    .filter((d) => !STRUCTURE_LINE.test(d) && !METADATA_LINE.test(d))
     .join('\n');
   return [...tokenize(`${summary}\n${description}`, { minLen: 3, stopwords: STOPWORDS })];
 }

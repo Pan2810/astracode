@@ -51,6 +51,11 @@ export async function askFci({ config, prompt, timeoutMs, redact, onRetry, onAtt
               { role: 'system', content: SYSTEM },
               { role: 'user', content: prompt },
             ],
+            // Field riêng của từng nhà cung cấp, đến từ ASTRACODE_JUDGE_EXTRA_BODY.
+            // Trộn nông và extra THẮNG: nó sinh ra để đè, ví dụ thêm
+            // `chat_template_kwargs` tắt thinking của Qwen. Ðổi lại, đặt
+            // `messages` vào đó sẽ thay cả prompt — đừng làm thế.
+            ...(config.fciExtraBody ?? {}),
           }),
           signal: AbortSignal.timeout(timeoutMs),
         });

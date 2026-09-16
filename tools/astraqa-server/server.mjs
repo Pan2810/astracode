@@ -58,7 +58,38 @@ export function readConfig(env = process.env) {
     fciBaseUrl: env.FPT_BASE_URL || '',
     fciApiKey: env.FPT_API_KEY || '',
     fciModel: env.FPT_MODEL || '',
+    fciExtraBody: parseExtraBody(env.ASTRACODE_JUDGE_EXTRA_BODY),
   };
+}
+
+/**
+ * `ASTRACODE_JUDGE_EXTRA_BODY` — JSON object trộn thêm vào body gửi model.
+ *
+ * Có vì mỗi nhà cung cấp đòi một field riêng: Qwen3.6 phải tắt thinking bằng
+ * `{"chat_template_kwargs":{"enable_thinking":false}}`, còn DeepSeek không cần.
+ * Ðể ở env chứ KHÔNG hardcode trong code: `chat_template_kwargs` là field riêng
+ * của một nhà cung cấp, gửi nó cho nhà cung cấp khác là gửi rác.
+ *
+ * JSON hỏng thì NÉM ngay lúc khởi động. Im lặng bỏ qua là kiểu hỏng tệ nhất ở
+ * đây: model vẫn chạy, vẫn trả lời, chỉ là cái field bạn tưởng đã bật thì không
+ * bao giờ được gửi — và không có gì trong log nói ra điều đó.
+ */
+export function parseExtraBody(raw) {
+  const s = String(raw ?? '').trim();
+  if (!s) return null;
+
+  let parsed;
+  try {
+    parsed = JSON.parse(s);
+  } catch (err) {
+    throw new Error(
+      `ASTRACODE_JUDGE_EXTRA_BODY không phải JSON hợp lệ: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error(`ASTRACODE_JUDGE_EXTRA_BODY phải là một JSON object, nhận được ${Array.isArray(parsed) ? 'mảng' : typeof parsed}.`);
+  }
+  return parsed;
 }
 
 function sendJson(res, code, obj) {
@@ -323,7 +354,14 @@ const isMain = process.argv[1] && fileURLToPath(import.meta.url) === path.resolv
 if (isMain) {
   // `.env` ở gốc repo, cùng quy ước với evals/run.ts: biến đã export thắng file.
   loadDotEnv();
-  const config = readConfig();
+  let config;
+  try {
+    config = readConfig();
+  } catch (err) {
+    // Cấu hình sai thì DỪNG HẲN, đừng khởi động rồi chạy sai âm thầm.
+    console.error(`astraqa-server KHÔNG khởi động được: ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(2);
+  }
   await fs.mkdir(config.workspaceDir, { recursive: true });
   createServer(config).listen(config.port, '127.0.0.1');
 }

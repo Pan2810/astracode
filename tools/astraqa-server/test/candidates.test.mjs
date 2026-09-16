@@ -66,6 +66,31 @@ test('§1.1 — siêu dữ liệu quản trị không được thành từ khoá
   }
 });
 
+test('§1.1 — khung markdown của tickets_md KHÔNG được thành từ khoá', () => {
+  // Ðịnh dạng export thật: `- summary:` / `- status:` là dòng field, `### description`
+  // là heading. Ðể nguyên thì `status` lọt vào (§1.1 cấm) và chữ "description" của
+  // cái heading thành từ khoá cho MỌI ticket — đo được 216 lần trích trên dữ liệu thật.
+  const terms = queryTerms({
+    key: 'GEN-R305',
+    title: 'Update UI/UX',
+    body: [
+      '- summary: Update UI/UX',
+      '- status: in_progress',
+      '',
+      '### description',
+      '',
+      'Refactor the settings dialog layout',
+    ].join('\n'),
+  });
+  for (const rac of ['status', 'in_progress', 'progress', 'description', 'summary']) {
+    assert.ok(!terms.includes(rac), `"${rac}" là khung markdown, không được vào terms: ${terms}`);
+  }
+  // Nội dung thật của description thì PHẢI giữ.
+  for (const that of ['refactor', 'settings', 'dialog', 'layout']) {
+    assert.ok(terms.includes(that), `mất nội dung thật "${that}": ${terms}`);
+  }
+});
+
 test('§1.2 — dòng PO:/BA:/Developer: bị loại, tên người không thành từ khoá', () => {
   const terms = queryTerms({
     key: 'GEN-R169',

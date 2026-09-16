@@ -158,3 +158,110 @@ stopword là lệch spec, và phải do AstraQA quyết để hai bên còn so �
 **File `tickets_md` thật + repo/ref thật của AstraQA.** Có nó là chạy lại đúng hai lệnh ở trên
 rồi ra thẳng bảng §7. Không có nó thì mọi con số ở đây chỉ chứng minh engine hành xử đúng
 luật, không chứng minh được nó khớp engine nội bộ.
+
+---
+
+# Ðo trên DỮ LIỆU THẬT (2026-09-16)
+
+`E:/astraqa-demo-backup/astracode-baseline/tickets.md`, sha256 `b19c9a5b…8795d` **đã kiểm,
+khớp**. Repo `Pan2810/pimathon_coworklocal` @ `ce9fc6c63cb8…`, 154 file, 184 ticket.
+Ðích của engine nội bộ AstraQA: **MATCH 138 · CODE_AHEAD 44 · JIRA_AHEAD 2 · NO_EVIDENCE 0**.
+
+> Bảng 29 JIRA_AHEAD trên bộ ticket tổng hợp trước đây **bỏ**, không dùng làm mốc.
+
+## Bản TRƯỚC tái hiện đúng §0 của spec
+
+| | Spec §0 đo | Ta đo lại |
+|---|---:|---:|
+| `gen` bị trích | 294 lần | **294 lần** |
+| `done` bị trích | 28 lần | **28 lần** |
+| Ticket không có evidence | 0 | **0** |
+| `JIRA_AHEAD` | 0 | **0** |
+
+Trùng đến từng con số, nên bản TRƯỚC là mốc so tin được.
+
+## Một lỗi trong bản port, đã sửa
+
+`ticket.body` mà `tickets.mjs` trả về là **markdown thô**, gồm cả dòng field và heading:
+
+```
+- summary: Update UI/UX
+- status: in_progress
+
+### description
+
+PO: HoachBV
+Ghi chú: NamPDT,HiepHV3,LamHV7
+```
+
+Nên từ khoá lọt: `progress`/`in_progress` (từ dòng `- status:` — **§1.1 cấm dùng status**),
+`description` (từ heading, trích **216 lần**), `ngay`/`nhan`/`ghi`/`chu`, `46244` (serial ngày),
+và tên người. Ðã thêm `STRUCTURE_LINE` bỏ dòng field + heading trước khi tách từ. Có test khoá.
+
+Còn `Ngày nhận:` / `Ghi chú:` thì **chưa đụng** — chúng không nằm trong danh sách nhãn §1.2, và
+thêm nhãn là đổi verdict, phải do AstraQA quyết.
+
+## Bảng quyết định — bốn cách dựng văn bản truy vấn × bốn chế độ siết
+
+Khớp verdict với AstraQA, trên 184 ticket thật:
+
+| | `none` | `rare_term` | `min_terms_3` | `coverage` |
+|---|---:|---:|---:|---:|
+| **V1** — có áp §1.2 (đang chạy) | **182/184** | 140/184 | 164/184 | 179/184 |
+| **V3** — không áp §1.2 (như AstraQA) | **184/184** ✅ | **184/184** ✅ | 179/184 | 178/184 |
+
+**V3 + `none` (hoặc `rare_term`) ra ÐÚNG bảng: MATCH 138 · CODE_AHEAD 44 · JIRA_AHEAD 2 ·
+NO_EVIDENCE 0, khớp 184/184.**
+
+## Hai điều bảng trên nói ra
+
+**1. Bảng nghiệm thu chỉ đạt khi KHÔNG áp §1.2 — tức khi tên người vẫn là từ khoá.**
+
+Ví dụ `GEN-R164` "Settings Dialog — Provider config, theme, language":
+
+```
+V1 terms(7): settings, dialog, theme, language, selection, attachments, limits  → 0 file
+V3 terms(9): … + quandh14                                                        → 3 file
+             config.py, ui/settings_dialog.py, i18n.py
+```
+
+`ui/settings_dialog.py` đúng là file cần tìm — nhưng nó được tìm ra nhờ **`quandh14`**, tên
+người của BA, chứ không nhờ `settings` hay `dialog`. 40 trong 42 ticket lệch đều kiểu này.
+
+Nói cách khác: con số 138 MATCH có một phần đáng kể do khớp tên người. §1.2 của spec sinh ra
+để bịt đúng chỗ đó, và bịt xong thì bảng lệch.
+
+**2. Lựa chọn `rare_term` của tôi hiệu chỉnh trên probe SAI.**
+
+Probe cũ dựng ticket giả lập từ các term **hiếm nhất** của chính file đích, nên luôn tồn tại
+một term hiếm và `rare_term` không bao giờ bị phạt — 40/40 ở mọi mức. Ticket thật dùng từ vựng
+phổ thông (`settings`, `dialog`, `history`), không có term nào đủ hiếm, nên `rare_term` giết
+42 ticket. Trên dữ liệu thật `none` hơn hẳn (182 so với 140).
+
+Nhưng `none` **trượt ca thử B** của spec (lọt `ui/cowork_tab.py` qua "zero"+"knowledge") — đúng
+cái false positive mà §5 nói `backend=none` không được phép để lọt vì không có judge dọn sau.
+
+`TIGHTEN_MODE` vẫn để `rare_term` — **chưa đổi**, chờ quyết định.
+
+## Ba câu cần AstraQA chốt
+
+1. **Có áp §1.2 không?** Áp thì đúng hơn nhưng lệch bảng 42 ticket; không áp thì khớp 184/184
+   nhưng giữ nguyên việc tên người ghi điểm.
+2. **`Ngày nhận:` / `Ghi chú:`** có vào danh sách nhãn §1.2 không?
+3. **Chế độ siết nào?** Ca thử B (spec) và dữ liệu thật đang chỉ hai hướng ngược nhau.
+
+Cộng hai câu đã gửi trước: regex key `GEN-R169`, và 154 vs 155 file.
+
+## Backend `fci` — DeepSeek-V4-Flash
+
+Gateway `https://token-api.fpt.ai/v1`, 3 ticket đầu của file thật:
+
+| | |
+|---|---:|
+| Tổng | 32 357 ms |
+| Mỗi ticket | 23,5s · 2,4s · 4,9s |
+| Parse JSON | **3/3 (100%)** |
+| Lượt hỏng · 429 · 503 | 0 · 0 · 0 |
+
+**Model KHÔNG trả kèm suy luận trước JSON** — gọi thẳng để xem văn bản thô: khối ```json bắt
+đầu ngay vị trí 0. Không cần `ASTRACODE_JUDGE_EXTRA_BODY`, **không phải đổi sang Qwen3.8-27B**.
