@@ -355,7 +355,8 @@ builtin — nên `package.json` của repo không phải đụng tới).
 | `fixtures/tickets-heading.md` | Mẫu ticket dạng heading (key `WEB-1001`, `1024`, `EXP_7`) |
 | `fixtures/tickets-table.md` | Mẫu ticket dạng bảng tiếng Việt (key `#77`, `ABC_42`, `ops.deploy.v2`) |
 | `test/fakeCli.mjs` | Đóng thế CLI của AstraCode để test/nghiệm thu chạy offline |
-| `test/*.test.mjs` | 76 test (`node --test test/*.test.mjs`), không cần mạng/gateway/token |
+| `lib/admin.mjs` | Trang `/admin` chỉ đọc (HTML tự chứa) + bốn route đọc job/result/report/log. Không nút dừng, chỉ nhận GET |
+| `test/*.test.mjs` | 86 test (`node --test test/*.test.mjs`), không cần mạng/gateway/token |
 | `README.md` | Bản đầy đủ của mọi thứ dưới đây |
 
 ## 2. Ba backend
@@ -570,9 +571,9 @@ Cập nhật 2026-09-16 trên máy mới (`E:\astracode`, Node v24.14.1, pnpm 11
   → `401`. Đừng dùng nó để kiểm key; phép thử đúng là `POST /v1/chat/completions` với một
   model có thật.
 
-- **Test: 76/76 xanh**, chạy offline (`cd tools/astraqa-server && node --test test/*.test.mjs`),
-  ~10 s. 47 ca gốc + 9 ca lớp quan sát + 12 ca backoff/limiter/cách ly lỗi + 8 ca
-  `ASTRACODE_MAX_TICKETS` và `/healthz`. **Không ca nào gọi model thật.**
+- **Test: 86/86 xanh**, chạy offline (`cd tools/astraqa-server && node --test test/*.test.mjs`),
+  ~12 s. 47 ca gốc + 9 ca lớp quan sát + 12 ca backoff/limiter/cách ly lỗi + 8 ca
+  `ASTRACODE_MAX_TICKETS` và `/healthz` + 10 ca trang `/admin`. **Không ca nào gọi model thật.**
 
 - Đã commit vào nhánh `feat/astraqa-server` (**chưa push**).
 
@@ -730,6 +731,111 @@ trạng thái cũ, phân biệt nhau bằng `reason`:
 | `judge_failed: …` | đã thử chấm, lượt gọi hỏng — **chưa biết** |
 | `skipped_quota_limit` | chưa thử lần nào vì vượt `ASTRACODE_MAX_TICKETS` — **chưa xét** |
 | `no_match` / `matched_by_key` / `matched_by_summary` / … | đã chấm thật, kết luận đáng tin |
+
+## 6c. Trang `/admin` và kết quả chạy thử 184 ticket (2026-09-16)
+
+### Trang theo dõi chỉ đọc
+
+```
+http://127.0.0.1:8000/admin
+```
+
+Mở thẳng bằng trình duyệt, **không cần token** khi gọi từ chính máy chạy server. Gọi từ máy
+khác thì bắt buộc `Authorization: Bearer <ASTRACODE_SERVICE_TOKEN>`.
+
+Lý do chọn loopback thay vì luôn bắt token: trình duyệt không gắn header `Authorization` vào
+một lần điều hướng thường, nên bắt token ở đây là biến trang demo thành thứ không mở được —
+mà server thì chỉ `listen` trên `127.0.0.1`. Vẫn kiểm loopback chứ không bỏ hẳn xác thực: đổi
+`listen` sang `0.0.0.0` là các route admin đòi token trở lại thay vì mở toang. **Cổng token
+của các route cũ không được nới theo loopback** — `POST /api/v1/analyze` vẫn 401 nếu thiếu token.
+
+Trang tự làm mới mỗi 2 giây, hiện: job đang chạy (thanh tiến độ `done/total` + tên ticket đang
+xử lý), job xong (ba đường tải), job hỏng (message lỗi đã che secret). Header khai backend,
+model, và số lượt gọi model của phiên. **Không có nút dừng/huỷ** — mọi method khác `GET` trả 405.
+
+| Route | Trả về |
+|---|---|
+| `GET /admin` | HTML tự chứa, CSS/JS inline, không CDN |
+| `GET /api/v1/jobs` | `{server, jobs[]}` — gộp sổ trong bộ nhớ và `results/` trên đĩa |
+| `GET /api/v1/jobs/{run_id}/result` | `results/<run_id>.json` |
+| `GET /api/v1/jobs/{run_id}/report` | `results/<run_id>.md` |
+| `GET /api/v1/jobs/{run_id}/log` | `logs/<run_id>.log` dạng text |
+
+`run_id` từ URL đi qua `slugifyRunId` rồi đường dẫn đã ghép còn bị kiểm lại là có nằm trong
+`results/` `logs/` không. Trang dựng DOM bằng `textContent`, không nội suy chuỗi vào HTML.
+
+Toàn bộ logic nằm ở `lib/admin.mjs`. `server.mjs` chỉ được nối dây: 35 dòng thêm, 0 dòng sửa.
+
+### Chạy thử 184 ticket, backend `none`
+
+Repo `psf/requests`, 184 ticket trộn tiếng Việt có dấu và tiếng Nhật, không tốn quota:
+
+| | |
+|---|---:|
+| Thời gian cả job | **6 098 ms** |
+| Mỗi ticket | ~33 ms |
+| `judge_parsed / judge_calls` | **184/184** |
+| Bằng chứng giữ / loại / kẹp | **920 / 0 / 0** |
+| Phân bố | `partial` 184 |
+
+**Tiến độ có nhích thật** — đọc `/api/v1/jobs` liên tục thấy 133 lần `done` tăng. Nhưng cả job
+chỉ 6 giây mà trang làm mới mỗi 2 giây, nên **khán giả chỉ kịp thấy khoảng 3 khung hình**
+(≈7 % → 40 % → 80 %). Đây là sự thật của backend `none`, không phải lỗi; **đừng thêm delay giả**.
+Muốn tiến độ bò chậm để quay/chiếu thì dùng backend `fci` (8–34 s một ticket) hoặc chấp nhận
+6 giây.
+
+Tất cả đều có vết: `logs/PREFLIGHT-184.log` (29 KB), `results/PREFLIGHT-184.json` (325 KB),
+`results/PREFLIGHT-184.md` (130 KB).
+
+### Backend `none` KHÔNG sinh bản ghi "đã quét N file @ revision, từ khoá: …"
+
+Quan trọng cho AstraQA, vì verdict `JIRA_AHEAD` cần bản ghi đó. Hiện trạng:
+
+`buildRepoContext()` **có tính** `totalFiles` (số file đã quét), `keywords` (danh sách từ khoá)
+và `truncated`. Nhưng `judgeWithoutModel()` **vứt hết**, chỉ dùng `ctx.snippets`. Item trả về
+đúng năm field cũ:
+
+```
+key · code_status · confidence · evidence[] · reason
+```
+
+- **Số file đã quét: KHÔNG có ở đâu cả** — không trong item, không trong `result`, không trong `stats`.
+- **Revision: có, nhưng sai tầng.** SHA nằm **chỉ** trong chuỗi `report_md` (`- commit: dae7ef6…`),
+  ở mức **job**, không phải mức ticket, và không phải một field JSON để đọc bằng máy.
+- **Danh sách từ khoá: KHÔNG có.** `evidence[].note` chỉ mang **một** từ khoá của **riêng dòng
+  đó** (`khớp từ khoá "request"`), và chỉ với file có khớp.
+- Nặng nhất: ticket `no_match` có `evidence: []` — **không còn gì** chứng minh phép quét đã chạy.
+  Nhìn từ AstraQA, "đã quét 184 file với từ khoá X,Y,Z và không thấy gì" và "chưa quét" là
+  **không phân biệt được**. Đúng chỗ mà `JIRA_AHEAD` cần phân biệt.
+
+Chưa thêm gì, theo đúng yêu cầu. Muốn có thì đây là hình dạng rẻ nhất, thêm vào **mỗi item**:
+
+```json
+"scan": { "files_scanned": 184, "revision": "dae7ef6…", "keywords": ["session","cookie"] }
+```
+
+Thêm một field vào item là **đổi schema** — phải chốt với AstraQA trước.
+
+### Đổi sang key FCI khi có: chỉ đổi env, KHÔNG sửa code — vẫn đúng
+
+Đã kiểm lại toàn bộ `lib/*.mjs` và `server.mjs`: **không dòng code nào biết nhà cung cấp nào**
+(chỉ một câu trong comment). Đường đi duy nhất là:
+
+```
+url    = `${FPT_BASE_URL bỏ / cuối}/chat/completions`
+header = Authorization: Bearer ${FPT_API_KEY}
+body   = { model: FPT_MODEL, temperature: 0, messages: […] }
+```
+
+Nên đổi ba giá trị trong `.env` rồi khởi động lại là xong. Phiên này đã làm đúng vậy một lần
+(FCI → Gemini) mà không sửa dòng nào. Hai điều kiện để nó còn đúng:
+
+1. Endpoint mới phải **OpenAI-compatible** ở đúng đường `/chat/completions` và nhận
+   `Authorization: Bearer <key>`. Nếu FCI đòi header khác hoặc đường khác thì **sẽ phải sửa code**.
+2. `ASTRACODE_JUDGE=fci`, và **nhớ biến export thắng `.env`** — lỡ export `ASTRACODE_JUDGE=none`
+   ở phiên shell nào thì sửa `.env` mãi cũng không có tác dụng.
+
+Kiểm sau khi đổi: `curl -sS http://127.0.0.1:8000/healthz` phải khai đúng `model` mới.
 ## 7. Lệnh chạy
 
 **Khởi động** (đang chạy bằng đúng lệnh này):
