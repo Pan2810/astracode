@@ -582,6 +582,18 @@ export async function runAnalyzeJob({ job, body, config, redact, log, limiter = 
       );
     }
 
+    // Cùng một luật, áp cho bộ lọc bằng chứng: sinh ra N mảnh rồi loại sạch N
+    // thì bảng trả về toàn item "đã xét, không thấy gì" — AstraQA đọc thành
+    // NO_EVIDENCE hàng loạt, và không có dòng nào nói rằng chỗ hỏng là bộ lọc.
+    // Ca đã gặp: WORKSPACE_DIR tương đối → repoDir tương đối → mọi path bị coi
+    // là "thoát khỏi repo". Lỗi thì hiện lỗi, không bao giờ trả bảng rỗng im lặng.
+    if (stats.evidence_kept === 0 && stats.evidence_dropped > 0) {
+      throw new Error(
+        `Bộ lọc bằng chứng loại toàn bộ ${stats.evidence_dropped}/${stats.evidence_dropped} mảnh — ` +
+          `kiểm WORKSPACE_DIR/repoDir (repoDir="${repoDir}", tuyệt đối=${path.isAbsolute(repoDir)}).`,
+      );
+    }
+
     stats.duration_ms = Date.now() - startedAt;
     const generatedAt = new Date().toISOString();
     return {

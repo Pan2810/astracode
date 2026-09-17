@@ -35,7 +35,11 @@ export function readConfig(env = process.env) {
   const here = path.dirname(fileURLToPath(import.meta.url));
   return {
     port: Number(env.PORT || 8000),
-    workspaceDir: env.WORKSPACE_DIR || path.join(os.tmpdir(), 'astracode-astraqa'),
+    // LUÔN tuyệt đối. Một `WORKSPACE_DIR=./.workspace` làm `repoDir` trong
+    // analyze.mjs thành đường dẫn tương đối, trong khi `keepRealEvidence` so nó
+    // với `path.resolve(...)`: phép so không bao giờ đúng, nên 100% bằng chứng
+    // bị loại với lý do "thoát khỏi repo" mà job vẫn báo succeeded.
+    workspaceDir: path.resolve(env.WORKSPACE_DIR || path.join(os.tmpdir(), 'astracode-astraqa')),
     // Mặc định trỏ vào CLI của chính repo này — tính từ vị trí file, không phải
     // một đường dẫn cứng của máy ai.
     cliPath: env.ASTRACODE_CLI_PATH || path.resolve(here, '..', '..', 'packages', 'cli', 'dist', 'main.js'),
@@ -91,6 +95,22 @@ export function parseExtraBody(raw) {
     throw new Error(`ASTRACODE_JUDGE_EXTRA_BODY phải là một JSON object, nhận được ${Array.isArray(parsed) ? 'mảng' : typeof parsed}.`);
   }
   return parsed;
+}
+
+/**
+ * WORKSPACE_DIR phải tạo được VÀ ghi được — kiểm ngay lúc khởi động.
+ *
+ * Kiểm bằng cách ghi thật một file rồi xoá, không dùng `fs.access(W_OK)`: trên
+ * Windows nó chỉ nhìn cờ read-only của thư mục và trả "được" ở cả những chỗ mà
+ * lần ghi đầu tiên sẽ ném. Thà chết lúc khởi động còn hơn để job đầu tiên chết
+ * sau khi AstraQA đã chờ xong 184 ticket.
+ */
+export async function ensureWorkspaceWritable(dir) {
+  await fs.mkdir(dir, { recursive: true });
+  const probe = path.join(dir, `.write-probe-${process.pid}`);
+  await fs.writeFile(probe, 'ok', 'utf8');
+  await fs.rm(probe, { force: true });
+  return dir;
 }
 
 function sendJson(res, code, obj) {
@@ -366,6 +386,16 @@ if (isMain) {
     console.error(`astraqa-server KHÔNG khởi động được: ${err instanceof Error ? err.message : String(err)}`);
     process.exit(2);
   }
-  await fs.mkdir(config.workspaceDir, { recursive: true });
+  try {
+    await ensureWorkspaceWritable(config.workspaceDir);
+  } catch (err) {
+    // Cùng luật với readConfig: hỏng thì hiện lỗi ngay ở banner, đừng khởi động
+    // rồi để mỗi job tự chết một kiểu.
+    console.error(
+      `astraqa-server KHÔNG khởi động được: WORKSPACE_DIR "${config.workspaceDir}" không tạo/ghi được — ` +
+        `${err instanceof Error ? err.message : String(err)}`,
+    );
+    process.exit(2);
+  }
   createServer(config).listen(config.port, '127.0.0.1');
 }

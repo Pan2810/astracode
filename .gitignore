@@ -24,3 +24,6 @@ evals/results/
 .venv/
 .tmp
 documents
+
+# Workspace tam cua astraqa-server (WORKSPACE_DIR) — clone cua repo nguoi khac, xoa sau moi job
+.workspace/

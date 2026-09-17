@@ -23,7 +23,7 @@ Server tự nạp `.env` ở gốc repo (và `.env.local`) theo đúng quy ướ
 | Biến | Bắt buộc | Mặc định | Là gì |
 |---|---|---|---|
 | `PORT` | không | `8000` | Cổng nghe, bind `127.0.0.1` |
-| `WORKSPACE_DIR` | không | `<tmp>/astracode-astraqa` | Nơi clone repo tạm. Mỗi job một thư mục con, **xoá khi job kết thúc** (kể cả khi lỗi) |
+| `WORKSPACE_DIR` | không | `<tmp>/astracode-astraqa` | Nơi clone repo tạm. Mỗi job một thư mục con, **xoá khi job kết thúc** (kể cả khi lỗi). Đường dẫn tương đối được resolve về tuyệt đối theo cwd lúc khởi động; tạo/ghi không được thì server DỪNG |
 | `ASTRACODE_SERVICE_TOKEN` | **nên có** | rỗng | Token AstraQA phải gửi. **Rỗng = chế độ dev, bỏ kiểm xác thực**, có một dòng cảnh báo lúc khởi động |
 | `ASTRACODE_JUDGE` | không | `fci` | `fci` \| `cli` \| `none` — xem "Ba backend" bên dưới |
 | `FPT_BASE_URL` | khi `fci` | — | Gốc endpoint OpenAI-compatible, **kèm `/v1`** |
