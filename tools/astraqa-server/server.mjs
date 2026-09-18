@@ -22,6 +22,7 @@ import { fileURLToPath } from 'node:url';
 import { makeRedactor, redactMessage } from './lib/redact.mjs';
 import { loadDotEnv } from './lib/env.mjs';
 import { runAnalyzeJob } from './lib/analyze.mjs';
+import { runJudgeJob } from './lib/judge.mjs';
 import { createRunLog, bannerLines } from './lib/observe.mjs';
 import { createLimiter } from './lib/limit.mjs';
 import { createAdminRoutes } from './lib/admin.mjs';
@@ -204,14 +205,45 @@ export function createServer(config, { log = console.log, persist = true } = {})
   });
   const slog = (msg) => log(baseRedact(String(msg ?? '')));
 
-  function start(job, body, runLog) {
-    const redact = makeRedactor([
+  function redactorFor(body) {
+    return makeRedactor([
       config.serviceToken,
       config.astraworkJwt,
       config.fciApiKey,
       body.astrawork_token,
       body.repo_token,
     ]);
+  }
+
+  /**
+   * Chạy một job judge.
+   *
+   * Không dùng chung `start` với analyze: kết quả của judge đọc được TỪNG PHẦN
+   * trong lúc chạy (`job.results` lớn dần), nên trạng thái cuối chỉ đóng sổ chứ
+   * không phải là lúc dữ liệu xuất hiện. Nhập hai đường này vào một hàm sẽ làm
+   * mờ đúng điểm khác nhau ấy.
+   */
+  function startJudge(job, body, runLog) {
+    const redact = redactorFor(body);
+    job.status = 'running';
+    usage.jobs += 1;
+    runJudgeJob({ job, body, config, redact, log: (m) => runLog.line(m), limiter, usage })
+      .then((result) => {
+        job.status = 'succeeded';
+        job.result = result;
+        runLog.saveResult(result);
+        runLog.line(`đã ghi: ${runLog.jsonFile} | ${runLog.mdFile}`);
+      })
+      .catch((err) => {
+        job.status = 'failed';
+        job.error = redactMessage(err, redact);
+        runLog.line(`job judge xong: FAILED — ${job.error}`);
+        runLog.saveFailure(job.error);
+      });
+  }
+
+  function start(job, body, runLog) {
+    const redact = redactorFor(body);
 
     job.status = 'running';
     usage.jobs += 1;
@@ -259,6 +291,9 @@ export function createServer(config, { log = console.log, persist = true } = {})
         // Chế độ siết của matcher (§5). Ðã đóng băng; khai ra để nhìn một cái là
         // biết bản đang chạy dùng luật nào, không phải đi đọc source.
         tighten_mode: TIGHTEN_MODE,
+        // Đường nào server này có. Bên gọi dò bằng đây thay vì POST thử rồi
+        // đọc 404 — một 404 còn có thể là sai đường dẫn hay sai proxy.
+        routes: ['/api/v1/analyze', '/api/v1/judge'],
         // Ðếm nội bộ từ lúc khởi động — KHÔNG hỏi nhà cung cấp, nên đây không
         // phải hạn mức còn lại. Lượt thử lại cũng tính, vì nó cũng là request thật.
         model_calls_this_session: usage.model_calls,
@@ -348,10 +383,92 @@ export function createServer(config, { log = console.log, persist = true } = {})
       return;
     }
 
+    if (route === '/api/v1/judge' && req.method === 'POST') {
+      let body;
+      try {
+        body = JSON.parse((await readBody(req)) || '{}');
+      } catch (err) {
+        return sendJson(res, 400, { error: `body không phải JSON hợp lệ: ${err instanceof Error ? err.message : ''}`.trim() });
+      }
+      if (!body || typeof body !== 'object' || Array.isArray(body)) {
+        return sendJson(res, 400, { error: 'body phải là một JSON object.' });
+      }
+
+      const missing = [];
+      if (typeof body.repo_url !== 'string' || !body.repo_url.trim()) missing.push('repo_url');
+      if (!Array.isArray(body.tickets) || body.tickets.length === 0) missing.push('tickets');
+      if (!body.verdict_guide || typeof body.verdict_guide !== 'object') missing.push('verdict_guide');
+      if (missing.length) {
+        return sendJson(res, 400, { error: `thiếu field bắt buộc: ${missing.join(', ')}` });
+      }
+
+      const job = {
+        id: randomUUID(),
+        kind: 'judge',
+        run_id: body.run_id ?? null,
+        repo_url: typeof body.repo_url === 'string' ? body.repo_url : null,
+        backend: config.judgeBackend,
+        status: 'queued',
+        progress: { done: 0, total: body.tickets.length },
+        // Mảng bên gọi đọc dần. Có mặt ngay từ lúc queued để một lần GET sớm
+        // nhận `results: []` chứ không phải `undefined` — "chưa có kết quả nào"
+        // và "field này không tồn tại" là hai câu trả lời khác nhau.
+        results: [],
+        result: undefined,
+        error: undefined,
+        abort: new AbortController(),
+        createdAt: Date.now(),
+      };
+      jobs.set(job.id, job);
+      while (jobs.size > MAX_JOBS_KEPT) jobs.delete(jobs.keys().next().value);
+
+      const runLog = createRunLog({
+        runsDir,
+        runId: body.run_id ? `${body.run_id}-judge` : null,
+        jobId: job.id,
+        redact: redactorFor(body),
+        log,
+        enabled: persist,
+      });
+      job.runLog = runLog;
+
+      runLog.line(
+        `POST /api/v1/judge ← ${clientIp(req)} | run_id ${job.run_id ?? '(không có)'} | job ${job.id} | ` +
+          `repo ${body.repo_url} | ref ${body.ref || '(mặc định)'} | ticket ${body.tickets.length} | ` +
+          `model ${config.fciModel || '(chưa cấu hình)'}`,
+      );
+
+      sendJson(res, 202, { job_id: job.id, status: 'queued', total: body.tickets.length });
+      startJudge(job, body, runLog);
+      return;
+    }
+
+    const j = /^\/api\/v1\/judge\/([^/]+)$/.exec(route);
+    if (j && req.method === 'GET') {
+      const job = jobs.get(decodeURIComponent(j[1]));
+      if (!job || job.kind !== 'judge') return sendJson(res, 404, { error: 'job_id không tồn tại' });
+      /*
+       * `results` trả về ở MỌI trạng thái, kể cả `failed`.
+       *
+       * Một job chết ở ticket thứ 150 vẫn đã chấm xong 149 ticket, và những
+       * kết luận ấy đúng như nhau dù cái thứ 150 có hỏng. Giấu chúng đi vì
+       * trạng thái cuối là xấu sẽ bắt bên gọi chạy lại cả 150 lượt model.
+       */
+      return sendJson(res, 200, {
+        status: job.status,
+        done: job.results.length,
+        total: job.progress?.total ?? job.results.length,
+        results: job.results,
+        ...(job.revision ? { source_revision: job.revision } : {}),
+        ...(job.stats ? { stats: job.stats } : {}),
+        ...(job.error ? { error: job.error } : {}),
+      });
+    }
+
     const m = /^\/api\/v1\/analyze\/([^/]+)$/.exec(route);
     if (m && req.method === 'GET') {
       const job = jobs.get(decodeURIComponent(m[1]));
-      if (!job) return sendJson(res, 404, { error: 'job_id không tồn tại' });
+      if (!job || job.kind === 'judge') return sendJson(res, 404, { error: 'job_id không tồn tại' });
       if (job.status === 'succeeded') return sendJson(res, 200, { status: 'succeeded', result: job.result });
       if (job.status === 'failed') return sendJson(res, 200, { status: 'failed', error: job.error });
       return sendJson(res, 200, {

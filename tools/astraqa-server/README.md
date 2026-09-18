@@ -29,6 +29,7 @@ Server tự nạp `.env` ở gốc repo (và `.env.local`) theo đúng quy ướ
 | `FPT_BASE_URL` | khi `fci` | — | Gốc endpoint OpenAI-compatible, **kèm `/v1`** |
 | `FPT_API_KEY` | khi `fci` | — | Gửi trong `Authorization: Bearer`. **Không bao giờ được in ra log** — log chỉ nói "có/KHÔNG" |
 | `FPT_MODEL` | khi `fci` | — | Ví dụ `Qwen3.8-27B` |
+| `ASTRACODE_JUDGE_CONCURRENCY` | không | `2` | Trần lượt gọi model chạy cùng lúc trên **cả server**. `POST /api/v1/judge` chạy song song tới đúng con số này; hạn mức tính theo API key mà key thì cả server dùng chung, nên trần ở đây chứ không ở từng job |
 | `ASTRACODE_CLI_PATH` | khi `cli` | `<repo>/packages/cli/dist/main.js` | Trỏ vào `test/fakeCli.mjs` để chạy thử không tốn LLM |
 | `ASTRAWORK_JWT` | khi `cli` | rỗng | JWT AstraWork. Request có `astrawork_token` thì dùng cái đó, không thì rơi về biến này |
 
@@ -130,6 +131,86 @@ Một `item`:
   "reason": "matched_by_key"
 }
 ```
+
+## Tầng judge — `POST /api/v1/judge`
+
+Ðường thứ hai, và nó trả lời một câu hỏi khác. `analyze` đi tìm: nó tự dò cả repo để
+đoán file nào liên quan tới ticket. `judge` soát lại: bên gọi **đã có bằng chứng** — từ
+tầng khớp từ khoá của chính nó, hay từ một lần `analyze` trước — và gửi kèm `path` +
+`lines`; việc của job này là ÐỌC đúng những dòng ấy rồi chọn kết luận.
+
+Ba điểm khác `analyze`, và cả ba là lý do nó là một đường riêng:
+
+| | `analyze` | `judge` |
+|---|---|---|
+| Model thấy gì | cây file đã lọc + các dòng khớp từ khoá | ÐÚNG các dòng bên gọi trích, kèm ngữ cảnh hai phía |
+| Chạy | tuần tự (để `done/total` có nghĩa) | song song tới `ASTRACODE_JUDGE_CONCURRENCY` lượt |
+| Ðọc kết quả | chờ cả job, rồi `result` | `results[]` **lớn dần**, đọc được giữa lúc chạy |
+
+**Từ vựng kết luận đến từ request.** Server không có tên verdict nào của riêng nó và
+không được có: `verdict_guide` là một object `{TÊN: "định nghĩa"}` do bên gọi cấp, nó đi
+thẳng vào prompt bằng chính câu chữ ấy, và một câu trả lời nằm ngoài danh sách bị từ
+chối. Ðổi cách gọi ở bên kia không phải sửa gì ở đây.
+
+```bash
+curl -sS -X POST http://127.0.0.1:8000/api/v1/judge \
+  -H "Authorization: Bearer $ASTRACODE_SERVICE_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "run_id": "RUN-1",
+    "repo_url": "https://github.com/org/repo.git",
+    "ref": "",
+    "tickets": [
+      {
+        "key": "WEB-1001",
+        "summary": "Ðăng nhập bằng mật khẩu",
+        "status": "done",
+        "grep_verdict": "CODE_AHEAD",
+        "grep_reason": "matched_by_key",
+        "evidence": [{ "path": "src/login.ts", "lines": "120-148" }]
+      }
+    ],
+    "verdict_guide": {
+      "MATCH": "kế hoạch và mã nguồn nói cùng một chuyện",
+      "CODE_AHEAD": "mã đã có, ticket chưa đóng",
+      "JIRA_AHEAD": "ticket đã đóng, mã chưa thấy",
+      "NO_EVIDENCE": "không tìm được gì kiểm chứng được"
+    }
+  }'
+```
+
+→ `202 {"job_id","status":"queued","total":1}`. Thiếu `repo_url`, `tickets` (mảng rỗng
+cũng tính là thiếu) hoặc `verdict_guide` → `400` kèm tên field thiếu.
+
+`GET /api/v1/judge/{job_id}` → luôn cùng một hình dạng, ở mọi trạng thái:
+
+```json
+{
+  "status": "running|succeeded|failed",
+  "done": 12,
+  "total": 40,
+  "source_revision": "<sha đã clone>",
+  "results": [
+    { "key": "WEB-1001", "verdict": "MATCH", "confidence": 0.82, "reason": "…", "tier": "ai" },
+    { "key": "WEB-1002", "tier": "grep", "error": "…" }
+  ],
+  "stats": { "judged": 11, "failed": 1, "no_snippet": 0, "hits_429": 0, "duration_ms": 41230 }
+}
+```
+
+`results` trả về kể cả khi `status` là `failed`: một job chết ở ticket thứ 150 vẫn đã
+chấm xong 149 ticket, và những kết luận ấy đúng như nhau dù cái thứ 150 có hỏng. Giấu
+chúng đi vì trạng thái cuối xấu là bắt bên gọi tiêu lại 149 lượt model.
+
+**`tier: "grep"` nghĩa là "giữ nguyên kết luận của tầng trước".** Một dòng như thế luôn
+kèm `error` nói vì sao, và có đúng ba nguyên nhân: lượt gọi model hỏng (mạng, 4xx, hết
+giờ), model trả về một verdict không có trong `verdict_guide`, hoặc không đọc được mảnh
+code nào để đưa cho model. Nguyên nhân thứ ba là chỗ dễ sai nhất và nó **không** gọi
+model: chấm mù rồi dán nhãn "AI" lên là kiểu hỏng tệ nhất của cả tầng này.
+
+Judge **không có backend dự bị tất định**. `ASTRACODE_JUDGE=none` biết nói "có nhắc tới",
+đúng thứ tầng khớp từ khoá đã làm — chạy nó ở đây là tiêu thời gian để ra lại kết luận
+cũ dưới một cái nhãn sai. Thiếu `FPT_*` thì job `failed` ngay và nói ra.
 
 ## Những chỗ cố tình nghiêm
 
