@@ -358,9 +358,18 @@ const PAGE = `<!doctype html>
  * server tiếp tục các route cũ của nó.
  *
  * `isAuthorized(req)` do server truyền vào — xem ghi chú ở `server.mjs` về việc
- * vì sao loopback được miễn token.
+ * vì sao loopback KHÔNG còn được miễn token.
  */
-export function createAdminRoutes({ jobs, config, usage, runsDir, redact = (s) => String(s), isAuthorized }) {
+export function createAdminRoutes({
+  jobs,
+  config,
+  usage,
+  runsDir,
+  redact = (s) => String(s),
+  isAuthorized,
+  /** Ghi lại một lần bị từ chối. Không mặc định là im lặng có chủ ý. */
+  denied = () => {},
+}) {
   const send = (res, code, type, body) => {
     res.writeHead(code, { 'Content-Type': type, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
     res.end(body);
@@ -395,7 +404,8 @@ export function createAdminRoutes({ jobs, config, usage, runsDir, redact = (s) =
       return true;
     }
     if (!isAuthorized(req)) {
-      sendJson(res, 401, { error: 'unauthorized: cần Authorization: Bearer <ASTRACODE_SERVICE_TOKEN> khi gọi từ máy khác' });
+      denied(req, route);
+      sendJson(res, 401, { error: 'unauthorized: cần Authorization: Bearer <ASTRACODE_SERVICE_TOKEN>' });
       return true;
     }
 

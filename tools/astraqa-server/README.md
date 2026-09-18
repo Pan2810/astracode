@@ -24,7 +24,7 @@ Server tự nạp `.env` ở gốc repo (và `.env.local`) theo đúng quy ướ
 |---|---|---|---|
 | `PORT` | không | `8000` | Cổng nghe, bind `127.0.0.1` |
 | `WORKSPACE_DIR` | không | `<tmp>/astracode-astraqa` | Nơi clone repo tạm. Mỗi job một thư mục con, **xoá khi job kết thúc** (kể cả khi lỗi). Đường dẫn tương đối được resolve về tuyệt đối theo cwd lúc khởi động; tạo/ghi không được thì server DỪNG |
-| `ASTRACODE_SERVICE_TOKEN` | **nên có** | rỗng | Token AstraQA phải gửi. **Rỗng = chế độ dev, bỏ kiểm xác thực**, có một dòng cảnh báo lúc khởi động |
+| `ASTRACODE_SERVICE_TOKEN` | **nên có** | rỗng | Token AstraQA phải gửi, và `/admin` cũng đòi nó (kể cả từ loopback). **Rỗng = chế độ dev, bỏ kiểm xác thực**, có một dòng cảnh báo lúc khởi động |
 | `ASTRACODE_JUDGE` | không | `fci` | `fci` \| `cli` \| `none` — xem "Ba backend" bên dưới |
 | `FPT_BASE_URL` | khi `fci` | — | Gốc endpoint OpenAI-compatible, **kèm `/v1`** |
 | `FPT_API_KEY` | khi `fci` | — | Gửi trong `Authorization: Bearer`. **Không bao giờ được in ra log** — log chỉ nói "có/KHÔNG" |
@@ -277,6 +277,23 @@ cũ dưới một cái nhãn sai. Thiếu `FPT_*` thì job `failed` ngay và nó
   `ASTRACODE_SERVICE_TOKEN`, key LLM bị che ở mọi log và mọi message lỗi — bằng cả literal
   lẫn pattern (bắt được cả secret không khai trước). `test/redact.test.mjs` canh điều này.
 - **Job nằm trong bộ nhớ**, tối đa 200 job gần nhất. Không DB, không trạng thái trên đĩa.
+- **`/admin` đòi token, kể cả từ chính máy này.** Loopback từng được miễn, vì trình duyệt
+  không gắn `Authorization` vào một lần điều hướng thường — nhưng "chạy trên localhost"
+  gồm cả mọi tab đang mở một trang lạ, và trang này liệt kê mọi job, mọi repo, mọi ticket.
+  Hệ quả: khi `ASTRACODE_SERVICE_TOKEN` đã đặt, mở `/admin` bằng thanh địa chỉ nhận 401.
+  Cách xem:
+
+  ```bash
+  curl -s -H "Authorization: Bearer $ASTRACODE_SERVICE_TOKEN" http://127.0.0.1:8000/admin
+  ```
+
+  Chưa đặt token thì server ở chế độ dev và mọi route của nó đã mở sẵn, `/admin` cũng vậy.
+  `/healthz` luôn mở: nó là cổng cho liveness probe.
+- **Log của server xuống đĩa theo ngày, giữ 7 ngày.** Dòng nào không thuộc job nào — banner,
+  dòng request, 401, 404 — vào `logs/server-<ngày>.log` thay vì chỉ ra console, vì console
+  của một tiến trình chạy nền là nơi không xem lại được. Mọi `.log` trong thư mục đó cũ hơn
+  bảy ngày bị xoá, kể cả `logs/<run_id>.log` — nên sau bảy ngày
+  `GET /api/v1/jobs/<id>/log` trả 404 cho run đó. `results/` không bị đụng tới.
 
 ## Chạy test
 
@@ -285,7 +302,7 @@ cd tools/astraqa-server
 node --test test/*.test.mjs
 ```
 
-47 test, **không cần mạng, không cần gateway, không tốn token**: repo git thật được dựng
+153 test, **không cần mạng, không cần gateway, không tốn token**: repo git thật được dựng
 trong thư mục tạm, backend `cli` đóng thế bằng `test/fakeCli.mjs`, backend `fci` đóng thế
 bằng một endpoint OpenAI-compatible dựng tại chỗ — nhưng đi qua đúng mọi bước mà bản chạy
 thật đi.

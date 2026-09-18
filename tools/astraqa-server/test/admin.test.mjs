@@ -59,7 +59,11 @@ async function poll(jobId, { tries = 400 } = {}) {
   throw new Error('job không kết thúc trong thời gian chờ');
 }
 
-const jobsApi = () => fetch(`${base}/api/v1/jobs`).then((r) => r.json());
+// Route admin đòi token kể cả từ loopback, nên mọi lần đọc ở đây đi qua
+// `adminFetch` — một chỗ duy nhất biết về header đó.
+const adminFetch = (url, init = {}) =>
+  fetch(url, { ...init, headers: { ...(init.headers ?? {}), Authorization: `Bearer ${TOKEN}` } });
+const jobsApi = () => adminFetch(`${base}/api/v1/jobs`).then((r) => r.json());
 const findRun = (list, runId) => list.jobs.find((j) => j.run_id === runId);
 
 before(async () => {
@@ -92,7 +96,8 @@ after(async () => {
 });
 
 test('GET /admin trả HTML tự chứa: không CDN, không lộ token', async () => {
-  const res = await fetch(`${base}/admin`);
+  // Kể cả từ chính máy này: loopback không còn được miễn token.
+  const res = await adminFetch(`${base}/admin`);
   assert.equal(res.status, 200);
   assert.match(res.headers.get('content-type'), /text\/html/);
   const html = await res.text();
@@ -108,10 +113,10 @@ test('GET /admin trả HTML tự chứa: không CDN, không lộ token', async (
 
 test('trang admin chỉ đọc: POST/DELETE bị từ chối, không có nút dừng', async () => {
   for (const method of ['POST', 'DELETE', 'PUT']) {
-    const res = await fetch(`${base}/api/v1/jobs`, { method, headers: { Authorization: `Bearer ${TOKEN}` } });
+    const res = await adminFetch(`${base}/api/v1/jobs`, { method });
     assert.equal(res.status, 405, `${method} phải bị chặn`);
   }
-  const html = await (await fetch(`${base}/admin`)).text();
+  const html = await (await adminFetch(`${base}/admin`)).text();
   for (const tu of ['/cancel', '/stop', '/abort']) {
     assert.ok(!html.includes(tu), `trang không được có đường ${tu}`);
   }
@@ -162,7 +167,7 @@ test('job xong: tải được result.json, report.md và log', async () => {
   // File được ghi qua hàng đợi nên có thể trễ vài ms sau khi job báo xong.
   let resultRes;
   for (let i = 0; i < 100; i++) {
-    resultRes = await fetch(`${base}/api/v1/jobs/ADMIN-TAI/result`);
+    resultRes = await adminFetch(`${base}/api/v1/jobs/ADMIN-TAI/result`);
     if (resultRes.status === 200) break;
     await new Promise((r) => setTimeout(r, 20));
   }
@@ -172,12 +177,12 @@ test('job xong: tải được result.json, report.md và log', async () => {
   assert.equal(saved.run_id, 'ADMIN-TAI');
   assert.deepEqual(saved, done.result, 'file tải về phải khớp hệt result trả qua API cũ');
 
-  const reportRes = await fetch(`${base}/api/v1/jobs/ADMIN-TAI/report`);
+  const reportRes = await adminFetch(`${base}/api/v1/jobs/ADMIN-TAI/report`);
   assert.equal(reportRes.status, 200);
   assert.match(reportRes.headers.get('content-type'), /text\/markdown/);
   assert.match(await reportRes.text(), /# AstraCode — báo cáo đối chiếu code/);
 
-  const logRes = await fetch(`${base}/api/v1/jobs/ADMIN-TAI/log`);
+  const logRes = await adminFetch(`${base}/api/v1/jobs/ADMIN-TAI/log`);
   assert.equal(logRes.status, 200);
   assert.match(logRes.headers.get('content-type'), /text\/plain/);
   const logText = await logRes.text();
@@ -207,7 +212,7 @@ test('job failed: /api/v1/jobs hiện message lỗi, và message không chứa r
 
 test('run_id bịa → 404 cho cả ba đường tải', async () => {
   for (const kind of ['result', 'report', 'log']) {
-    const res = await fetch(`${base}/api/v1/jobs/KHONG-CO-THAT-9999/${kind}`);
+    const res = await adminFetch(`${base}/api/v1/jobs/KHONG-CO-THAT-9999/${kind}`);
     assert.equal(res.status, 404, `${kind} phải trả 404`);
     const body = await res.json();
     assert.match(body.error, /không có|không hợp lệ/);
@@ -233,7 +238,7 @@ test('run_id có ../ KHÔNG thoát ra khỏi thư mục results/ và logs/', asy
 
   for (const xau of doc) {
     for (const kind of ['result', 'report', 'log']) {
-      const res = await fetch(`${base}/api/v1/jobs/${encodeURIComponent(xau)}/${kind}`);
+      const res = await adminFetch(`${base}/api/v1/jobs/${encodeURIComponent(xau)}/${kind}`);
       // Khẳng định đúng là "không bao giờ trả file", không phải "đúng mã 404":
       // một chuỗi như `..` bị chuẩn hoá ngay trên URL (`/api/v1/jobs/../result`
       // → `/api/v1/result`) nên nó không còn là route admin nữa và rơi xuống
@@ -248,14 +253,17 @@ test('run_id có ../ KHÔNG thoát ra khỏi thư mục results/ và logs/', asy
   // trong pathname rồi mới được decode trong handler. Nó phải bị slugify chặn.
   for (const xau of ['%2F..%2F..%2Fbi-mat', '..%2Fbi-mat', '%2Fetc%2Fpasswd']) {
     for (const kind of ['result', 'report', 'log']) {
-      const res = await fetch(`${base}/api/v1/jobs/${xau}/${kind}`);
+      const res = await adminFetch(`${base}/api/v1/jobs/${xau}/${kind}`);
       assert.equal(res.status, 404, `"${xau}"/${kind} phải 404, nhận ${res.status}`);
       assert.ok(!(await res.text()).includes('NOI_DUNG_BI_MAT_KHONG_DUOC_LO'), `"${xau}" đọc được file ngoài thư mục!`);
     }
   }
 
   // File thật vẫn đọc được — bài test trên không phải chặn nhầm tất cả.
-  assert.ok((await fetch(`${base}/api/v1/jobs/ADMIN-TAI/result`)).ok, 'run_id hợp lệ vẫn phải tải được');
+  assert.ok(
+    (await adminFetch(`${base}/api/v1/jobs/ADMIN-TAI/result`)).ok,
+    'run_id hợp lệ vẫn phải tải được',
+  );
 });
 
 test('/api/v1/jobs khai backend, model và bộ đếm — không khai key', async () => {
@@ -267,6 +275,23 @@ test('/api/v1/jobs khai backend, model và bộ đếm — không khai key', asy
   const raw = JSON.stringify(data);
   assert.ok(!raw.includes(TOKEN), '/api/v1/jobs lộ service token');
   assert.ok(!Object.keys(data.server).some((k) => /key|token|secret/i.test(k)), `field đáng ngờ: ${Object.keys(data.server)}`);
+});
+
+test('/admin không token → 401, kể cả từ chính máy này', async () => {
+  // Loopback từng được miễn token, với lý do thật: trình duyệt không gắn
+  // `Authorization` vào một lần điều hướng. Nhưng "chạy trên localhost" gồm cả
+  // mọi tab đang mở một trang lạ, và trang này liệt kê mọi job, mọi repo và mọi
+  // ticket. Hệ quả là mở bằng thanh địa chỉ sẽ 401 — xem ghi chú ở server.mjs.
+  for (const route of ['/admin', '/api/v1/jobs', '/api/v1/jobs/ADMIN-TAI/log']) {
+    assert.equal((await fetch(`${base}${route}`)).status, 401, `${route} phải 401`);
+  }
+  // Sai token cũng vậy, và câu trả lời không được nói token đúng là gì.
+  const res = await fetch(`${base}/admin`, { headers: { Authorization: 'Bearer sai-be-bet' } });
+  assert.equal(res.status, 401);
+  assert.ok(!(await res.text()).includes(TOKEN), '401 lộ service token');
+
+  // `/healthz` vẫn mở: nó là cổng cho liveness probe.
+  assert.equal((await fetch(`${base}/healthz`)).status, 200);
 });
 
 test('gọi từ máy khác (không loopback) thì phải có token', async () => {

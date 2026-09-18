@@ -26,6 +26,7 @@ import { runJudgeJob } from './lib/judge.mjs';
 import { createRunLog, bannerLines } from './lib/observe.mjs';
 import { createLimiter } from './lib/limit.mjs';
 import { createAdminRoutes } from './lib/admin.mjs';
+import { createDailyLog } from './lib/daily.mjs';
 import { TIGHTEN_MODE } from './lib/candidates.mjs';
 import { parseTickets } from './lib/tickets.mjs';
 
@@ -137,22 +138,6 @@ function clientIp(req) {
   return String(raw).replace(/^::ffff:/, '');
 }
 
-/**
- * Bên gọi có đang ở chính máy này không.
- *
- * Trang `/admin` mở bằng trình duyệt, mà trình duyệt KHÔNG gắn `Authorization`
- * vào một lần điều hướng thường — bắt token ở đây là biến trang demo thành thứ
- * không mở được. Server lại chỉ `listen` trên `127.0.0.1` (xem cuối file), nên
- * "đến được cổng này" đã đồng nghĩa với "đang ngồi trước máy này".
- *
- * Vẫn kiểm loopback thay vì bỏ hẳn xác thực: nếu sau này ai đó đổi chỗ `listen`
- * sang `0.0.0.0`, các route admin lập tức đòi token trở lại thay vì mở toang.
- */
-function isLoopback(req) {
-  const raw = String(req.socket?.remoteAddress ?? '').replace(/^::ffff:/, '');
-  return raw === '127.0.0.1' || raw === '::1';
-}
-
 function bearerOf(req) {
   const h = req.headers.authorization ?? '';
   const m = /^Bearer\s+(.+)$/i.exec(String(h).trim());
@@ -198,12 +183,44 @@ export function createServer(config, { log = console.log, persist = true } = {})
   const handleAdmin = createAdminRoutes({
     jobs,
     config,
+    // Một lần bị từ chối ở đây là dòng đáng xem nhất trong cả file log: trang
+    // này liệt kê mọi job, mọi repo, mọi ticket. Trước đây nó không để lại gì
+    // — route admin tự kiểm quyền và tự trả 401, không đi qua cổng bên dưới.
+    denied: (req, route) => slog(`401 ${req.method} ${route} ← ${clientIp(req)}`),
     usage,
     runsDir,
     redact: baseRedact,
-    isAuthorized: (req) => isLoopback(req) || devMode || tokenOk(bearerOf(req), config.serviceToken),
+    /*
+     * `/admin` đòi token y như mọi route khác.
+     *
+     * Trước đây loopback được miễn, với lý do thật: trình duyệt KHÔNG gắn
+     * `Authorization` vào một lần điều hướng thường, nên bắt token là biến trang
+     * theo dõi thành thứ không mở được bằng cách mở nó. Nhưng "đến được cổng
+     * này" chỉ đồng nghĩa với "đang ngồi trước máy này" khi không có gì khác
+     * trên máy — mà một trang liệt kê mọi job, mọi repo và mọi ticket thì bất
+     * kỳ thứ gì chạy trên localhost cũng đọc được, kể cả một tab đang mở một
+     * trang web lạ.
+     *
+     * Hệ quả nói thẳng: khi SERVICE_TOKEN đã đặt, mở `/admin` bằng thanh địa
+     * chỉ sẽ nhận 401. Cách xem là gửi kèm header — `curl -H "Authorization:
+     * Bearer $ASTRACODE_SERVICE_TOKEN" .../admin` — hoặc chạy không token trên
+     * máy của mình, khi đó `devMode` bên dưới mở nó ra.
+     *
+     * `devMode` là khi CHƯA đặt token: không có gì để đòi, và một server không
+     * token thì mọi route của nó đã mở sẵn rồi.
+     */
+    isAuthorized: (req) => devMode || tokenOk(bearerOf(req), config.serviceToken),
   });
-  const slog = (msg) => log(baseRedact(String(msg ?? '')));
+  // Dòng nào không thuộc job nào — banner, dòng request, 401, 404 — vừa ra
+  // console vừa xuống `logs/server-<ngày>.log`, và bảy ngày là hạn. Xem
+  // lib/daily.mjs; `persist: false` (test) thì không đụng đĩa.
+  const serverLog = createDailyLog({
+    dir: path.join(runsDir, 'logs'),
+    redact: baseRedact,
+    log,
+    enabled: persist,
+  });
+  const slog = (msg) => serverLog.line(msg);
 
   function redactorFor(body) {
     return makeRedactor([
@@ -316,7 +333,7 @@ export function createServer(config, { log = console.log, persist = true } = {})
 
     if (!devMode && !tokenOk(bearerOf(req), config.serviceToken)) {
       // Ghi lại để biết có ai gõ cửa sai token — tuyệt đối không ghi token đã gửi.
-      slog(`${new Date().toISOString()} 401 ${req.method} ${route} ← ${clientIp(req)}`);
+      slog(`401 ${req.method} ${route} ← ${clientIp(req)}`);
       return sendJson(res, 401, { error: 'unauthorized: thiếu hoặc sai Authorization: Bearer <ASTRACODE_SERVICE_TOKEN>' });
     }
 
