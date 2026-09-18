@@ -200,8 +200,22 @@ export function pickVerdict(parsed, { key, guide }) {
 export async function runJudgeJob({ job, body, config, redact, log, limiter, usage }) {
   const options = { ...DEFAULT_JUDGE_OPTIONS, ...(body.options ?? {}) };
   const timeoutMs = Math.max(1, Number(options.timeout_sec) || DEFAULT_JUDGE_OPTIONS.timeout_sec) * 1000;
-  const tickets = parseJudgeTickets(body.tickets);
+  const all = parseJudgeTickets(body.tickets);
   const guide = parseVerdictGuide(body.verdict_guide);
+
+  /*
+   * `ASTRACODE_MAX_TICKETS` applies here too, and for a sharper reason than on
+   * the analyze path: one judged ticket is exactly one model call, so a board of
+   * 190 is 190 calls against a quota that is counted per day. A demo needs a
+   * handful of rows to show the tier works.
+   *
+   * The tickets over the cap are NOT dropped: they come back as `tier: "grep"`
+   * with a reason saying so, because "kept the previous tier because nobody
+   * looked" and "kept it because the model agreed" must not read the same.
+   */
+  const cap = Math.max(0, Number(config.maxTickets ?? 0) || 0);
+  const tickets = cap > 0 ? all.slice(0, cap) : all;
+  const over = cap > 0 ? all.slice(cap) : [];
 
   if (!fciConfigured(config)) {
     // Judge là tầng model, không có tầng dự bị tất định: `none` chỉ biết "có
@@ -213,11 +227,13 @@ export async function runJudgeJob({ job, body, config, redact, log, limiter, usa
   const repoDir = path.join(config.workspaceDir, job.id, 'repo');
   await fs.mkdir(repoDir, { recursive: true });
 
-  job.progress = { done: 0, total: tickets.length };
+  job.progress = { done: 0, total: all.length };
   const startedAt = Date.now();
   const stats = {
     model: config.fciModel,
-    tickets_total: tickets.length,
+    tickets_total: all.length,
+    tickets_skipped: over.length,
+    max_tickets: cap,
     judged: 0,
     failed: 0,
     no_snippet: 0,
@@ -238,8 +254,9 @@ export async function runJudgeJob({ job, body, config, redact, log, limiter, usa
     });
     job.revision = head || null;
     log(
-      `clone xong: ${tickets.length} ticket để chấm lại, commit ${head || '(không rõ)'} — ` +
-        `model ${config.fciModel}, tối đa ${limiter.cap} lượt cùng lúc`,
+      `clone xong: ${tickets.length}/${all.length} ticket để chấm lại, commit ${head || '(không rõ)'} — ` +
+        `model ${config.fciModel}, tối đa ${limiter.cap} lượt cùng lúc` +
+        (over.length ? `, bỏ qua ${over.length} vì ASTRACODE_MAX_TICKETS=${cap}` : ''),
     );
 
     const one = async (ticket) => {
@@ -259,6 +276,11 @@ export async function runJudgeJob({ job, body, config, redact, log, limiter, usa
           return { key: ticket.key, tier: 'grep', error: why };
         }
 
+        if (job.abort?.signal?.aborted) {
+          // Ðã gọi dừng trong lúc đọc file. Không gửi nữa — và nói ra, để bên
+          // gọi phân biệt "chưa xét" với "đã xét, không kết luận được".
+          return { key: ticket.key, tier: 'grep', error: 'đã dừng trước khi tới lượt' };
+        }
         const prompt = buildVerdictPrompt({ ticket, guide, snippets, skipped });
         const { text } = await limiter.run(() =>
           askFci({
@@ -316,10 +338,23 @@ export async function runJudgeJob({ job, body, config, redact, log, limiter, usa
     });
     await Promise.all(lanes);
 
+    // Những ticket vượt trần vẫn có mặt trong kết quả. Bỏ hẳn chúng sẽ khiến
+    // bên gọi tưởng job đã xét tới, rồi không hiểu vì sao phần còn lại của
+    // bảng không đổi.
+    for (const ticket of over) {
+      job.results.push({
+        key: ticket.key,
+        tier: 'grep',
+        error: `chưa xét: vượt trần ASTRACODE_MAX_TICKETS=${cap}`,
+      });
+      job.progress = { done: job.results.length, total: all.length };
+    }
+
     stats.duration_ms = Date.now() - startedAt;
+    stats.cancelled = Boolean(job.abort?.signal?.aborted);
     log(
-      `job judge xong: ${stats.judged} chấm lại, ${stats.failed} hỏng, ${stats.no_snippet} không có mảnh code | ` +
-        `${stats.duration_ms}ms`,
+      `job judge xong${stats.cancelled ? ' (đã dừng theo yêu cầu)' : ''}: ${stats.judged} chấm lại, ` +
+        `${stats.failed} hỏng, ${stats.no_snippet} không có mảnh code | ${stats.duration_ms}ms`,
     );
     return {
       run_id: body.run_id ?? null,

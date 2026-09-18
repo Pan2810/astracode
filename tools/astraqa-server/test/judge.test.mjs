@@ -137,10 +137,12 @@ function get(jobId) {
   return fetch(`${base}/api/v1/judge/${jobId}`, { headers: { Authorization: `Bearer ${TOKEN}` } }).then((r) => r.json());
 }
 
+const SETTLED = new Set(['succeeded', 'failed', 'cancelled']);
+
 async function settle(jobId, { tries = 300 } = {}) {
   for (let i = 0; i < tries; i++) {
     const json = await get(jobId);
-    if (json.status === 'succeeded' || json.status === 'failed') return json;
+    if (SETTLED.has(json.status)) return json;
     await new Promise((r) => setTimeout(r, 30));
   }
   throw new Error('job judge không kết thúc trong thời gian chờ');
@@ -385,6 +387,66 @@ test('hai họ job không đọc lẫn nhau', async () => {
     headers: { Authorization: `Bearer ${TOKEN}` },
   });
   assert.equal(wrongDoor.status, 404);
+});
+
+test('gọi dừng thì cắt lượt đang bay và giữ nguyên kết quả đã có', async () => {
+  // Model chậm, để job còn đang chạy khi lệnh dừng tới.
+  reply = ({ key }) => ({
+    delayMs: 120,
+    body: {
+      choices: [
+        {
+          message: {
+            content:
+              '```json\n' +
+              JSON.stringify({ items: [{ key, verdict: 'MATCH', confidence: 0.5, reason: 'ok' }] }) +
+              '\n```',
+          },
+        },
+      ],
+    },
+  });
+  const keys = ['C-1', 'C-2', 'C-3', 'C-4', 'C-5', 'C-6', 'C-7', 'C-8'];
+  const { job_id } = await post({
+    repo_url: repoUrl,
+    tickets: keys.map((k) => ticket(k)),
+    verdict_guide: GUIDE,
+  }).then((r) => r.json());
+
+  // Chờ tới khi có ít nhất một kết quả, rồi gọi dừng.
+  let before = 0;
+  for (let i = 0; i < 200; i++) {
+    const snap = await get(job_id);
+    if (snap.results.length > 0) {
+      before = snap.results.length;
+      break;
+    }
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  assert.ok(before > 0, 'job chưa chấm được dòng nào trước khi gọi dừng');
+
+  const stopped = await fetch(`${base}/api/v1/judge/${job_id}`, {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${TOKEN}` },
+  });
+  assert.equal(stopped.status, 200);
+
+  const done = await settle(job_id);
+  // `cancelled`, không phải `succeeded`: job làm đúng thứ được bảo, nhưng nói
+  // "xong" sẽ khiến bên gọi tưởng cả danh sách đã được xét.
+  assert.equal(done.status, 'cancelled');
+  // Kết quả đã trả tiền rồi thì ở lại.
+  assert.ok(done.results.length >= before, 'dừng làm mất kết quả đã có');
+  // Và không chấm hết: đó là cả lý do có nút dừng.
+  assert.ok(done.results.filter((r) => r.tier === 'ai').length < keys.length);
+});
+
+test('dừng một job id lạ là 404', async () => {
+  const missing = await fetch(`${base}/api/v1/judge/khong-co-that`, {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${TOKEN}` },
+  });
+  assert.equal(missing.status, 404);
 });
 
 test('/healthz khai đường judge, không khai key', async () => {

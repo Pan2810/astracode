@@ -229,7 +229,10 @@ export function createServer(config, { log = console.log, persist = true } = {})
     usage.jobs += 1;
     runJudgeJob({ job, body, config, redact, log: (m) => runLog.line(m), limiter, usage })
       .then((result) => {
-        job.status = 'succeeded';
+        // Một job đã bị gọi dừng thì kết thúc là `cancelled`, không phải
+        // `succeeded`: nó làm đúng thứ được bảo, nhưng nói "xong" sẽ khiến bên
+        // gọi tưởng cả danh sách đã được xét.
+        job.status = job.abort?.signal?.aborted ? 'cancelled' : 'succeeded';
         job.result = result;
         runLog.saveResult(result);
         runLog.line(`đã ghi: ${runLog.jsonFile} | ${runLog.mdFile}`);
@@ -444,6 +447,28 @@ export function createServer(config, { log = console.log, persist = true } = {})
     }
 
     const j = /^\/api\/v1\/judge\/([^/]+)$/.exec(route);
+    if (j && req.method === 'DELETE') {
+      const job = jobs.get(decodeURIComponent(j[1]));
+      if (!job || job.kind !== 'judge') return sendJson(res, 404, { error: 'job_id không tồn tại' });
+      /*
+       * Gọi dừng, không phải xoá.
+       *
+       * Một lượt judge là một lượt gọi model, và bên gọi bấm dừng vì không muốn
+       * tiêu tiếp — nên việc đầu tiên là `abort`, để lượt đang bay bị cắt và
+       * những lượt còn xếp hàng không bao giờ được gửi. Kết quả đã có ở lại
+       * nguyên vẹn: chúng đã được trả tiền rồi.
+       */
+      job.abort?.abort();
+      if (job.status === 'queued' || job.status === 'running') job.status = 'cancelled';
+      job.runLog?.line(`DELETE /api/v1/judge/${job.id} ← ${clientIp(req)} | dừng ở ${job.results.length}/${job.progress?.total ?? '?'}`);
+      return sendJson(res, 200, {
+        status: job.status,
+        done: job.results.length,
+        total: job.progress?.total ?? job.results.length,
+        results: job.results,
+      });
+    }
+
     if (j && req.method === 'GET') {
       const job = jobs.get(decodeURIComponent(j[1]));
       if (!job || job.kind !== 'judge') return sendJson(res, 404, { error: 'job_id không tồn tại' });
