@@ -152,6 +152,17 @@ không được có: `verdict_guide` là một object `{TÊN: "định nghĩa"}`
 thẳng vào prompt bằng chính câu chữ ấy, và một câu trả lời nằm ngoài danh sách bị từ
 chối. Ðổi cách gọi ở bên kia không phải sửa gì ở đây.
 
+**`guidance_path` — quy ước riêng của codebase.** Một đường dẫn, không phải nội dung:
+tệp nằm trong repo job này sắp clone, nên gửi nội dung xuống nghĩa là bên gọi giữ một
+bản sao của một tệp nó không bao giờ đọc, và bản sao ấy sẽ lệch với nhánh mà judge
+thật sự đọc. Ðường dẫn do bên gọi đưa chứ AstraCode không tự tìm, vì bộ rules đang áp
+có thể ở cấp tenant chứ không nằm trong repo — chỉ bên kia biết bộ nào đang thắng.
+
+Nội dung tệp được nối vào prompt SAU danh sách kết luận và TRƯỚC ticket: nó giải thích
+cách đọc mã nguồn này, chứ không được thêm hay đổi nghĩa một kết luận nào. Một tệp bảo
+model trả về tên khác vẫn bị chặn ở chỗ cũ. Ðường dẫn leo ra ngoài bản clone thì không
+mở; đọc hỏng thì thôi, vì thiếu quy ước làm câu trả lời nghèo đi chứ không làm nó sai.
+
 ```bash
 curl -sS -X POST http://127.0.0.1:8000/api/v1/judge \
   -H "Authorization: Bearer $ASTRACODE_SERVICE_TOKEN" \
@@ -181,6 +192,31 @@ curl -sS -X POST http://127.0.0.1:8000/api/v1/judge \
 
 → `202 {"job_id","status":"queued","total":1}`. Thiếu `repo_url`, `tickets` (mảng rỗng
 cũng tính là thiếu) hoặc `verdict_guide` → `400` kèm tên field thiếu.
+
+## `.astraqa/rules.yml` — tệp rules của đội
+
+`analyze` đọc `.astraqa/rules.yml` (hoặc `.yaml`) ở gốc bản clone và trả **nguyên văn**
+trong `repo_rules`. AstraCode không hiểu nội dung tệp này và không được hiểu: luật
+verdict nằm bên AstraQA, và một bộ luật thứ hai đọc cùng một tệp theo cách hơi khác là
+cách nhanh nhất để hai bên nói hai điều khác nhau về cùng một dòng. Ở đây chỉ có ba
+việc: tệp có không, nó bao nhiêu byte, nội dung là gì.
+
+```json
+"repo_rules": {
+  "path": ".astraqa/rules.yml",
+  "bytes": 312,
+  "text": "done_means:\n  - done\n",
+  "too_big": false,
+  "guidance": { "path": ".astraqa/judge.md", "bytes": 91, "text": "…" }
+}
+```
+
+`null` khi repo không có tệp, và **`null` khác một tệp rỗng**: tệp rỗng là đội đã nói
+"dùng mặc định", không có tệp là đội chưa nói gì và bộ luật cấp tenant mới được lên
+tiếng. Gộp hai cái làm một là âm thầm đổi bộ luật đang áp.
+
+Trần 256 KB. Vượt trần thì `too_big: true` và `text` rỗng — không cắt bớt, vì một tệp
+rules bị cắt giữa chừng vẫn parse được và sẽ quyết verdict bằng một nửa bộ luật.
 
 `GET /api/v1/judge/{job_id}` → luôn cùng một hình dạng, ở mọi trạng thái:
 

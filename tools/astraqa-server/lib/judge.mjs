@@ -28,6 +28,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { cloneRepo } from './git.mjs';
+import { readGuidanceText } from './repoRules.mjs';
 import { buildVerdictPrompt } from './verdictPrompt.mjs';
 import { extractJsonBlock } from './jsonBlock.mjs';
 import { askFci, fciConfigured } from './fciJudge.mjs';
@@ -253,6 +254,23 @@ export async function runJudgeJob({ job, body, config, redact, log, limiter, usa
       timeoutMs,
     });
     job.revision = head || null;
+
+    /*
+     * Quy ước riêng của codebase, nếu bên gọi trỏ tới một tệp.
+     *
+     * Ðường dẫn do AstraQA gửi (`guidance_path`) chứ không phải AstraCode tự
+     * tìm: bộ rules đang áp có thể ở cấp tenant chứ không nằm trong repo, và
+     * chỉ bên kia mới biết bộ nào đang thắng. Ở đây chỉ mở đúng đường dẫn đó
+     * trong bản clone — và chỉ khi nó thật sự nằm trong bản clone.
+     *
+     * Ðọc hỏng thì thôi: thiếu quy ước làm câu trả lời nghèo đi, không làm nó
+     * sai, còn ném ở đây thì hỏng cả job vì một tệp phụ.
+     */
+    const guidance = await readGuidanceText({
+      repoDir,
+      rel: body.guidance_path,
+      log,
+    });
     log(
       `clone xong: ${tickets.length}/${all.length} ticket để chấm lại, commit ${head || '(không rõ)'} — ` +
         `model ${config.fciModel}, tối đa ${limiter.cap} lượt cùng lúc` +
@@ -281,7 +299,7 @@ export async function runJudgeJob({ job, body, config, redact, log, limiter, usa
           // gọi phân biệt "chưa xét" với "đã xét, không kết luận được".
           return { key: ticket.key, tier: 'grep', error: 'đã dừng trước khi tới lượt' };
         }
-        const prompt = buildVerdictPrompt({ ticket, guide, snippets, skipped });
+        const prompt = buildVerdictPrompt({ ticket, guide, snippets, skipped, guidance });
         const { text } = await limiter.run(() =>
           askFci({
             config,

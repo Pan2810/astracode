@@ -46,7 +46,7 @@ function ticketBlock(ticket) {
     .join('\n');
 }
 
-export function buildVerdictPrompt({ ticket, guide, snippets, skipped = [] }) {
+export function buildVerdictPrompt({ ticket, guide, snippets, skipped = [], guidance = '' }) {
   const names = Object.keys(guide);
   const allowed = names.map((name) => `- ${name}: ${guide[name]}`).join('\n');
 
@@ -81,11 +81,24 @@ export function buildVerdictPrompt({ ticket, guide, snippets, skipped = [] }) {
     ) +
     '\n```';
 
+  /*
+   * Từ vựng riêng của codebase, do đội tự viết (`judge_guidance` trong rules).
+   *
+   * Đặt SAU danh sách kết luận và TRƯỚC ticket: nó giải thích cách đọc mã
+   * nguồn này, chứ không được phép thêm hay đổi nghĩa một kết luận nào. Một
+   * tệp hướng dẫn bảo model trả về tên khác vẫn bị `pickVerdict` chặn.
+   */
+  const house = String(guidance || '').trim();
+  const houseBlock = house
+    ? ['', '--- QUY ƯỚC CỦA CODEBASE NÀY (đội tự viết) ---', house, '--- HẾT QUY ƯỚC ---']
+    : [];
+
   return [
     HOW,
     '',
     'Các kết luận được phép, và chỉ những kết luận này:',
     allowed,
+    ...houseBlock,
     '',
     ticketBlock(ticket),
     '',

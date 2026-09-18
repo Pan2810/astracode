@@ -456,3 +456,60 @@ test('/healthz khai đường judge, không khai key', async () => {
   assert.equal(health.model, 'model-thu');
   assert.equal(JSON.stringify(health).includes(KEY), false);
 });
+
+test('quy ước của codebase tới được prompt, nhưng không nới được từ vựng verdict', async () => {
+  // Ðội để tệp quy ước trong repo, và AstraQA trỏ tới nó bằng `guidance_path`.
+  // Ðường dẫn do bên gọi đưa vì bộ rules đang áp có thể ở cấp tenant chứ không
+  // nằm trong repo — chỉ bên kia biết bộ nào đang thắng.
+  const dir = path.join(tmp, 'repo');
+  await fs.mkdir(path.join(dir, '.astraqa'), { recursive: true });
+  await fs.writeFile(
+    path.join(dir, '.astraqa', 'judge.md'),
+    'Ở repo này "adapter" và "connector" là một thứ.\n',
+  );
+  await run('git', ['add', '-A'], { cwd: dir });
+  await run(
+    'git',
+    ['-c', 'user.email=t@example.invalid', '-c', 'user.name=t', 'commit', '-q', '-m', 'quy uoc'],
+    { cwd: dir },
+  );
+
+  seen.length = 0;
+  const started = await post({
+    run_id: 'run-guidance',
+    repo_url: repoUrl,
+    verdict_guide: GUIDE,
+    guidance_path: '.astraqa/judge.md',
+    tickets: [{ key: 'G-1', summary: 'connector', evidence: [{ path: 'src/auth.py', lines: '40' }] }],
+  });
+  const { job_id } = await started.json();
+  let state;
+  do {
+    await new Promise((r) => setTimeout(r, 15));
+    state = await get(job_id);
+  } while (!SETTLED.has(state.status));
+
+  const prompt = seen.at(-1).prompt;
+  assert.match(prompt, /adapter/, 'quy ước phải tới được model');
+  // Và nó nằm SAU danh sách kết luận: nó giải thích cách đọc mã nguồn này, chứ
+  // không được thêm hay đổi nghĩa một kết luận nào.
+  assert.ok(prompt.indexOf('CODE_AHEAD') < prompt.indexOf('adapter'));
+});
+
+test('không có guidance_path thì prompt không mọc thêm mục nào', async () => {
+  seen.length = 0;
+  const started = await post({
+    run_id: 'run-no-guidance',
+    repo_url: repoUrl,
+    verdict_guide: GUIDE,
+    tickets: [{ key: 'G-2', summary: 'login', evidence: [{ path: 'src/auth.py', lines: '40' }] }],
+  });
+  const { job_id } = await started.json();
+  let state;
+  do {
+    await new Promise((r) => setTimeout(r, 15));
+    state = await get(job_id);
+  } while (!SETTLED.has(state.status));
+
+  assert.doesNotMatch(seen.at(-1).prompt, /QUY ƯỚC CỦA CODEBASE/);
+});

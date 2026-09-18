@@ -14,6 +14,7 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { cloneRepo } from './git.mjs';
+import { readRepoRules } from './repoRules.mjs';
 import { parseTickets } from './tickets.mjs';
 import { buildPrompt, buildJudgePrompt } from './prompt.mjs';
 import { extractJsonBlock, pickItem } from './jsonBlock.mjs';
@@ -456,6 +457,16 @@ export async function runAnalyzeJob({ job, body, config, redact, log, limiter = 
         `chấm ${toJudge.length} bằng backend ${backend}${skipped.length ? `, bỏ qua ${skipped.length} vì ASTRACODE_MAX_TICKETS` : ''}`,
     );
 
+    /*
+     * Tệp rules của đội, nguyên văn, nếu repo có.
+     *
+     * Đọc ở đây vì đây là chỗ duy nhất có bản clone. AstraCode không hiểu nội
+     * dung — luật verdict nằm bên AstraQA — nên nó chỉ chuyển tệp đi. Đọc hỏng
+     * không làm hỏng job: một repo không có rules là chuyện bình thường, và
+     * bên kia đã có sẵn đường lui về bộ luật cấp tenant.
+     */
+    const repoRules = await readRepoRules({ repoDir, log });
+
     /**
      * Index toàn repo, dựng ÐÚNG MỘT LẦN cho cả job.
      *
@@ -603,6 +614,12 @@ export async function runAnalyzeJob({ job, body, config, redact, log, limiter = 
       // SHA đầy đủ của commit đã clone. Cùng giá trị lặp lại trong `item.scan.revision`
       // để mỗi item tự chứa, dựng được link dẫn chứng mà không phải ngoái lên.
       source_revision: head || null,
+      /*
+       * `.astraqa/rules.yml` như nó nằm trong repo, hoặc `null` khi repo không
+       * có. `null` khác với một tệp rỗng và bên gọi phân biệt hai cái: tệp rỗng
+       * là đội đã nói "dùng mặc định", không có tệp là đội chưa nói gì.
+       */
+      repo_rules: repoRules,
       items,
       report_md: buildReportMd({
         runId: body.run_id ?? job.id,
