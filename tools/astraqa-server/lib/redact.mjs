@@ -19,7 +19,7 @@ const PATTERNS = [
   [/\bsk-[A-Za-z0-9_\-=]{8,}/g, 'sk-***'],
   // token GitHub/GitLab
   [/\bgh[pousr]_[A-Za-z0-9]{10,}/g, 'gh*_***'],
-  [/\bglpat-[A-Za-z0-9_\-]{10,}/g, 'glpat-***'],
+  [/\bglpat-[A-Za-z0-9_-]{10,}/g, 'glpat-***'],
   // JWT ba khúc
   [/\bey[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}/g, '<jwt>***'],
   // Bearer <bất kỳ>

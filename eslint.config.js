@@ -122,6 +122,26 @@ export default tseslint.config(
     },
   },
 
+  // astraqa-server chạy trên Node ≥ 20 và dùng runtime của nó: `fetch` có sẵn,
+  // hẹn giờ là global, `AbortController` dùng để cắt một lượt gọi model quá
+  // giờ. Không khai ở đây thì `no-undef` báo 85 lỗi trên 16 file — một cổng
+  // lint không ai qua được là cổng lint không ai đọc.
+  {
+    files: ['tools/astraqa-server/**/*.mjs'],
+    languageOptions: {
+      globals: {
+        fetch: 'readonly',
+        setTimeout: 'readonly',
+        clearTimeout: 'readonly',
+        setInterval: 'readonly',
+        clearInterval: 'readonly',
+        AbortController: 'readonly',
+        AbortSignal: 'readonly',
+        queueMicrotask: 'readonly',
+      },
+    },
+  },
+
   // Script build/tooling chạy bằng Node, không phải code sản phẩm.
   {
     files: ['**/*.mjs'],

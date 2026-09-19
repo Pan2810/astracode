@@ -14,7 +14,7 @@ import path from 'node:path';
 import { cloneRepo } from '../lib/git.mjs';
 import { matchesAny } from '../lib/globs.mjs';
 import {
-  buildIndex, shortlistFor, queryTerms, discriminating, weightOf, MIN_TERMS,
+  buildIndex, shortlistFor, queryTerms, discriminating,
 } from '../lib/candidates.mjs';
 
 const REPO = 'https://github.com/Pan2810/pimathon_coworklocal.git';
