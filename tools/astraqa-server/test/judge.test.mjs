@@ -451,8 +451,11 @@ test('dừng một job id lạ là 404', async () => {
 
 test('/healthz khai đường judge, không khai key', async () => {
   const health = await fetch(`${base}/healthz`).then((r) => r.json());
-  assert.deepEqual(health.routes, ['/api/v1/analyze', '/api/v1/judge']);
+  assert.deepEqual(health.routes, ['/api/v1/analyze', '/api/v1/judge', '/api/v1/judge/cache']);
   assert.equal(health.judge_concurrency, 2);
+  // Cache khai dung lượng, không khai nội dung.
+  assert.equal(typeof health.judge_cache.bytes, 'number');
+  assert.equal(typeof health.judge_cache.tenants, 'number');
   assert.equal(health.model, 'model-thu');
   assert.equal(JSON.stringify(health).includes(KEY), false);
 });

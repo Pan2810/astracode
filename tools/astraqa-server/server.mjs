@@ -22,7 +22,8 @@ import { fileURLToPath } from 'node:url';
 import { makeRedactor, redactMessage } from './lib/redact.mjs';
 import { loadDotEnv } from './lib/env.mjs';
 import { runAnalyzeJob } from './lib/analyze.mjs';
-import { runJudgeJob } from './lib/judge.mjs';
+import { runJudgeJob, parseSelection } from './lib/judge.mjs';
+import { CACHE_DIRNAME, cacheStats, parseDuration, safeTenant, sweepCache } from './lib/judgeCache.mjs';
 import { createRunLog, bannerLines } from './lib/observe.mjs';
 import { createLimiter } from './lib/limit.mjs';
 import { createAdminRoutes } from './lib/admin.mjs';
@@ -286,11 +287,14 @@ export function createServer(config, { log = console.log, persist = true } = {})
         tighten_mode: TIGHTEN_MODE,
         // Đường nào server này có. Bên gọi dò bằng đây thay vì POST thử rồi
         // đọc 404 — một 404 còn có thể là sai đường dẫn hay sai proxy.
-        routes: ['/api/v1/analyze', '/api/v1/judge'],
+        routes: ['/api/v1/analyze', '/api/v1/judge', '/api/v1/judge/cache'],
         // Ðếm nội bộ từ lúc khởi động — KHÔNG hỏi nhà cung cấp, nên đây không
         // phải hạn mức còn lại. Lượt thử lại cũng tính, vì nó cũng là request thật.
         model_calls_this_session: usage.model_calls,
         jobs_this_session: usage.jobs,
+        // Cache judge đang chiếm bao nhiêu. `entries: null` nghĩa là có tệp quá
+        // lớn nên không đếm dòng — probe không được phép đọc 50MB mỗi lần gọi.
+        judge_cache: await cacheStats(path.join(config.workspaceDir, CACHE_DIRNAME)),
         ...(config.judgeBackend === 'fci'
           ? { fci_configured: Boolean(config.fciBaseUrl && config.fciApiKey && config.fciModel) }
           : config.judgeBackend === 'cli'
@@ -395,6 +399,21 @@ export function createServer(config, { log = console.log, persist = true } = {})
         return sendJson(res, 400, { error: `thiếu field bắt buộc: ${missing.join(', ')}` });
       }
 
+      /*
+       * Chọn lọc và cache được kiểm NGAY Ở ÐÂY, không để job tự chết.
+       *
+       * Một `mode` gõ sai hay một `skip_above` bằng 5 là sai ở phía người gửi,
+       * và một 400 kèm tên field sửa được trong mười giây; một job `failed` thì
+       * phải đi tìm trong log. `parseSelection` là cùng một hàm job sẽ gọi lại,
+       * nên hai nơi không thể lệch luật.
+       */
+      let selection;
+      try {
+        selection = parseSelection(body);
+      } catch (err) {
+        return sendJson(res, 400, { error: err instanceof Error ? err.message : String(err) });
+      }
+
       const job = {
         id: randomUUID(),
         kind: 'judge',
@@ -428,12 +447,41 @@ export function createServer(config, { log = console.log, persist = true } = {})
       runLog.line(
         `POST /api/v1/judge ← ${clientIp(req)} | run_id ${job.run_id ?? '(không có)'} | job ${job.id} | ` +
           `repo ${body.repo_url} | ref ${body.ref || '(mặc định)'} | ticket ${body.tickets.length} | ` +
-          `model ${config.fciModel || '(chưa cấu hình)'}`,
+          `model ${config.fciModel || '(chưa cấu hình)'} | mode ${selection.mode}` +
+          (selection.skipAbove === null ? '' : ` skip_above ${selection.skipAbove}`) +
+          ` | cache ${selection.cache ? `bật (tenant ${safeTenant(selection.tenant)})` : 'tắt'}` +
+          (selection.rulesVersion ? ` | rules ${selection.rulesVersion}` : ''),
       );
 
       sendJson(res, 202, { job_id: job.id, status: 'queued', total: body.tickets.length });
       startJudge(job, body, runLog);
       return;
+    }
+
+    /*
+     * Dọn cache. Ðứng TRƯỚC `/api/v1/judge/:job_id` vì `cache` cũng khớp mẫu
+     * job id — đặt sau thì lệnh dọn sẽ thành "không tìm thấy job tên cache".
+     *
+     * Không có TTL (khoá đã gồm revision), nên đây là cái chổi duy nhất: gọi
+     * khi đĩa đầy, với đúng mốc thời gian mình muốn bỏ.
+     */
+    if (route === '/api/v1/judge/cache' && req.method === 'DELETE') {
+      const raw = url.searchParams.get('older_than');
+      const ms = parseDuration(raw);
+      if (ms === null) {
+        return sendJson(res, 400, {
+          error: 'cần ?older_than=<số><s|m|h|d>, ví dụ older_than=30d — dọn mù cả cache là mất tiền, nên phải nói rõ mốc.',
+        });
+      }
+      const dir = path.join(config.workspaceDir, CACHE_DIRNAME);
+      let swept;
+      try {
+        swept = await sweepCache(dir, ms);
+      } catch (err) {
+        return sendJson(res, 500, { error: `không dọn được cache: ${baseRedact(err instanceof Error ? err.message : String(err))}` });
+      }
+      slog(`DELETE /api/v1/judge/cache?older_than=${raw} ← ${clientIp(req)} | xoá ${swept.removed}, giữ ${swept.kept}, ${swept.files} tệp`);
+      return sendJson(res, 200, { older_than: raw, ...swept });
     }
 
     const j = /^\/api\/v1\/judge\/([^/]+)$/.exec(route);
@@ -453,8 +501,9 @@ export function createServer(config, { log = console.log, persist = true } = {})
       job.runLog?.line(`DELETE /api/v1/judge/${job.id} ← ${clientIp(req)} | dừng ở ${job.results.length}/${job.progress?.total ?? '?'}`);
       return sendJson(res, 200, {
         status: job.status,
-        done: job.results.length,
+        done: job.progress?.done ?? job.results.length,
         total: job.progress?.total ?? job.results.length,
+        progress: job.progress,
         results: job.results,
       });
     }
@@ -471,8 +520,12 @@ export function createServer(config, { log = console.log, persist = true } = {})
        */
       return sendJson(res, 200, {
         status: job.status,
-        done: job.results.length,
+        // `done`/`total` ở cấp cao nhất nói về LƯỢT GỌI MODEL — đúng thứ đáng
+        // chờ. Số dòng đã có nằm ở `results.length`, và tám ô đếm đầy đủ nằm ở
+        // `progress` bên dưới.
+        done: job.progress?.done ?? job.results.length,
         total: job.progress?.total ?? job.results.length,
+        progress: job.progress,
         results: job.results,
         ...(job.revision ? { source_revision: job.revision } : {}),
         ...(job.stats ? { stats: job.stats } : {}),

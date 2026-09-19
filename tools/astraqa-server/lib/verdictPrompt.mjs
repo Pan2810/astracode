@@ -34,10 +34,27 @@ const HOW = [
  * đoán mà không biết mình đang phản biện cái gì thì hay trả về đúng hệt ý kiến
  * cũ — nghĩa là tốn một lượt gọi để in lại tầng grep dưới nhãn "AI".
  */
+/**
+ * Trần chữ cho phần mô tả ticket.
+ *
+ * Một mô tả dài không làm verdict đúng hơn: thứ quyết định nằm ở code được
+ * trích, còn mô tả chỉ để model biết ticket đang nói về chuyện gì. Cắt ở 600
+ * ký tự và NÓI RA là đã cắt, để không ai đọc prompt rồi tưởng model đã thấy cả
+ * bài.
+ */
+export const MAX_TICKET_TEXT = 600;
+
+function clip(raw, max = MAX_TICKET_TEXT) {
+  const s = String(raw ?? '').trim();
+  if (s.length <= max) return s;
+  return `${s.slice(0, max).trimEnd()}… (đã cắt, còn ${s.length - max} ký tự)`;
+}
+
 function ticketBlock(ticket) {
   return [
     `Ticket key: ${ticket.key}`,
-    ticket.summary ? `Tiêu đề: ${ticket.summary}` : '',
+    ticket.summary ? `Tiêu đề: ${clip(ticket.summary)}` : '',
+    ticket.description ? `Mô tả: ${clip(ticket.description)}` : '',
     ticket.status ? `Trạng thái bên kế hoạch: ${ticket.status}` : '',
     ticket.grep_verdict ? `Kết luận sơ bộ (tầng khớp từ khoá): ${ticket.grep_verdict}` : '',
     ticket.grep_reason ? `Lý do của kết luận sơ bộ: ${ticket.grep_reason}` : '',

@@ -13,7 +13,7 @@
  * `FPT_*` giữ nguyên, đổi nhà cung cấp chỉ là đổi giá trị `FPT_BASE_URL` và
  * `FPT_MODEL`. Không có nhánh riêng cho từng nhà cung cấp trong file này.
  */
-import { withRetry, RetryableHttpError, RETRY_STATUSES } from './retry.mjs';
+import { withRetry, RetryableHttpError, RETRY_STATUSES, parseRetryAfter } from './retry.mjs';
 
 export function fciConfigured(config) {
   return Boolean(config.fciBaseUrl && config.fciApiKey && config.fciModel);
@@ -67,7 +67,11 @@ export async function askFci({ config, prompt, timeoutMs, redact, onRetry, onAtt
         const body = redact(await res.text().catch(() => '')).slice(0, 300);
         const msg = `FCI trả ${res.status}: ${body || '(không có body)'}`;
         // 429/503 mới được thử lại; mọi mã khác ném thẳng, không chờ.
-        if (RETRY_STATUSES.has(res.status)) throw new RetryableHttpError(res.status, msg);
+        if (RETRY_STATUSES.has(res.status)) {
+          // `Retry-After` là nhà cung cấp tự nói còn bao lâu nữa mới hết cửa sổ
+          // hạn mức. Ðem theo để `withRetry` chờ đúng chừng ấy thay vì đoán.
+          throw new RetryableHttpError(res.status, msg, parseRetryAfter(res.headers.get('retry-after')));
+        }
         throw new Error(msg);
       }
 

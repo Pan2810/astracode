@@ -32,14 +32,27 @@ import { readGuidanceText } from './repoRules.mjs';
 import { buildVerdictPrompt } from './verdictPrompt.mjs';
 import { extractJsonBlock } from './jsonBlock.mjs';
 import { askFci, fciConfigured } from './fciJudge.mjs';
+import { openCache, cacheKey, CACHE_DIRNAME } from './judgeCache.mjs';
 
+/**
+ * Ngân sách prompt.
+ *
+ * Ba con số dưới đây là tiền. Bản đầu (12 dòng ngữ cảnh, 6 mảnh, 120 dòng mỗi
+ * mảnh) cho phép một ticket mang tới 720 dòng code vào prompt, trong khi thứ
+ * quyết định verdict gần như luôn nằm ở vài chục dòng quanh chỗ khớp: phần còn
+ * lại là tiền trả cho những dòng model đọc lướt qua. Ba mảnh, mỗi mảnh ±20 dòng
+ * quanh dòng khớp, là đủ để thấy cả thân hàm mà vẫn gọn hơn một bậc.
+ *
+ * Bên gọi vẫn nới lại được cho một job riêng bằng `options` — nhưng mặc định
+ * phải là bản rẻ, vì mặc định mới là thứ chạy 190 lần mỗi đêm.
+ */
 export const DEFAULT_JUDGE_OPTIONS = {
   /** Số dòng đọc thêm mỗi phía quanh khoảng được trích. */
-  context_lines: 12,
+  context_lines: 20,
   /** Trần số mảnh code cho một ticket, để một ticket 40 dẫn chứng không nổ prompt. */
-  max_snippets: 6,
-  /** Trần số dòng của một mảnh sau khi đã cộng ngữ cảnh. */
-  max_snippet_lines: 120,
+  max_snippets: 3,
+  /** Trần số dòng của một mảnh sau khi đã cộng ngữ cảnh: đúng ±20 dòng quanh dòng khớp. */
+  max_snippet_lines: 41,
   timeout_sec: 600,
 };
 
@@ -60,14 +73,21 @@ export function parseJudgeTickets(raw) {
     const key = String(t.key ?? '').trim();
     if (!key) throw new Error(`tickets[${i}].key phải là chuỗi không rỗng.`);
     const evidence = Array.isArray(t.evidence) ? t.evidence : [];
+    const conf = Number(t.grep_confidence);
     return {
       key,
       summary: String(t.summary ?? '').trim(),
+      // Phần mô tả dài, nếu bên gọi gửi. Vào prompt đã cắt bớt (xem
+      // `verdictPrompt.mjs`): một mô tả 8 nghìn chữ không làm verdict đúng hơn.
+      description: String(t.description ?? '').trim(),
       status: String(t.status ?? '').trim(),
       // Kết luận của tầng trước. Ði vào prompt như một ý kiến cần soát lại, và
       // là giá trị được giữ nguyên nếu lượt này hỏng.
       grep_verdict: String(t.grep_verdict ?? '').trim(),
       grep_reason: String(t.grep_reason ?? '').trim(),
+      // Tầng grep tự chấm mình chắc đến đâu. `null` = nó không nói, và một
+      // ticket không nói thì không bao giờ được bỏ qua vì "đã chắc".
+      grep_confidence: Number.isFinite(conf) ? Math.min(1, Math.max(0, conf > 1 ? conf / 100 : conf)) : null,
       evidence: evidence
         .filter((ev) => ev && typeof ev === 'object' && String(ev.path ?? '').trim())
         .map((ev) => ({
@@ -101,6 +121,54 @@ export function parseVerdictGuide(raw) {
     throw new Error('"verdict_guide" phải có ít nhất hai verdict để phân biệt.');
   }
   return guide;
+}
+
+/**
+ * Chọn lọc và cache: đọc bốn field mới của request, và từ chối những tổ hợp vô nghĩa.
+ *
+ *   - `mode: "full"` (mặc định) — mọi ticket đều được model xét, trừ khi cache
+ *     đã có sẵn câu trả lời cho đúng câu hỏi ấy.
+ *   - `mode: "selected"` — ticket nào tầng grep đã đủ chắc (`grep_confidence >=
+ *     skip_above`) thì giữ nguyên kết luận của nó, không tiêu một lượt model.
+ *
+ * Hai lỗi dưới đây trả 400 thay vì bỏ qua im lặng, và đó là chủ ý: `skip_above`
+ * gửi kèm `mode: "full"` mà bị lờ đi nghĩa là bên gọi tưởng mình đang tiết kiệm
+ * trong khi hoá đơn vẫn đầy đủ; còn `mode: "selected"` thiếu ngưỡng thì không
+ * ai biết "đủ chắc" là bao nhiêu.
+ */
+export function parseSelection(body = {}) {
+  const rawMode = body.mode === undefined || body.mode === null ? 'full' : String(body.mode).trim().toLowerCase();
+  if (!['full', 'selected'].includes(rawMode)) {
+    throw new Error('"mode" phải là "selected" hoặc "full".');
+  }
+  const hasSkip = body.skip_above !== undefined && body.skip_above !== null;
+  let skipAbove = null;
+  if (hasSkip) {
+    const n = Number(body.skip_above);
+    if (!Number.isFinite(n) || n <= 0 || n > 1) {
+      throw new Error('"skip_above" phải là một số trong khoảng (0, 1].');
+    }
+    skipAbove = n;
+  }
+  if (rawMode === 'selected' && skipAbove === null) {
+    throw new Error('mode "selected" cần "skip_above" — không có ngưỡng thì không biết thế nào là đã chắc.');
+  }
+  if (rawMode === 'full' && hasSkip) {
+    throw new Error('"skip_above" chỉ có nghĩa với mode "selected"; mode "full" xét mọi ticket.');
+  }
+  if (body.cache !== undefined && body.cache !== null && typeof body.cache !== 'boolean') {
+    throw new Error('"cache" phải là true hoặc false.');
+  }
+  return {
+    mode: rawMode,
+    skipAbove,
+    // Mặc định BẬT: khoá cache đã gồm cả revision, ticket, rules và model, nên
+    // một lần trúng là đúng câu hỏi ấy. Ðể mặc định tắt nghĩa là ai quên gửi
+    // `cache: true` thì trả tiền lại từ đầu.
+    cache: body.cache === undefined || body.cache === null ? true : body.cache,
+    rulesVersion: String(body.rules_version ?? '').trim(),
+    tenant: String(body.tenant ?? '').trim(),
+  };
 }
 
 /** `"120-148"` → `{start, end}`; `"42"` → `{start: 42, end: 42}`; rỗng → null. */
@@ -203,6 +271,7 @@ export async function runJudgeJob({ job, body, config, redact, log, limiter, usa
   const timeoutMs = Math.max(1, Number(options.timeout_sec) || DEFAULT_JUDGE_OPTIONS.timeout_sec) * 1000;
   const all = parseJudgeTickets(body.tickets);
   const guide = parseVerdictGuide(body.verdict_guide);
+  const selection = parseSelection(body);
 
   /*
    * `ASTRACODE_MAX_TICKETS` applies here too, and for a sharper reason than on
@@ -228,18 +297,54 @@ export async function runJudgeJob({ job, body, config, redact, log, limiter, usa
   const repoDir = path.join(config.workspaceDir, job.id, 'repo');
   await fs.mkdir(repoDir, { recursive: true });
 
-  job.progress = { done: 0, total: all.length };
+  /*
+   * Tiến độ: tám con số, và `total` là số lượt THẬT SỰ gọi model.
+   *
+   * Không phải số ticket gửi lên. Một job 190 ticket mà 150 ticket đã chắc ở
+   * tầng grep và 30 ticket trúng cache thì chỉ có 10 lượt phải chờ — một thanh
+   * tiến độ chạy tới 190 ở đó là thanh sai, và nó sai theo hướng khiến người
+   * ngồi xem tưởng còn lâu mới xong.
+   *
+   * Trước khi clone xong thì chưa biết cái nào trúng cache (khoá có revision),
+   * nên `total` khởi đầu bằng số ticket rồi được chỉnh lại đúng một lần, ngay
+   * sau khi phân loại.
+   */
+  const counted = {
+    done: 0,
+    total: tickets.length,
+    skipped: 0,
+    cached: 0,
+    model_calls: 0,
+    token_in: 0,
+    token_out: 0,
+    throttled: 0,
+  };
+  const publish = () => {
+    job.progress = { ...counted };
+  };
+  publish();
+
   const startedAt = Date.now();
   const stats = {
     model: config.fciModel,
     tickets_total: all.length,
     tickets_skipped: over.length,
     max_tickets: cap,
+    mode: selection.mode,
+    skip_above: selection.skipAbove,
+    cache: selection.cache,
+    rules_version: selection.rulesVersion || null,
+    skipped_sure: 0,
+    cache_hits: 0,
+    cache_writes: 0,
     judged: 0,
     failed: 0,
     no_snippet: 0,
     hits_429: 0,
     hits_503: 0,
+    throttled: 0,
+    token_in: 0,
+    token_out: 0,
     duration_ms: 0,
   };
   job.stats = stats;
@@ -271,13 +376,95 @@ export async function runJudgeJob({ job, body, config, redact, log, limiter, usa
       rel: body.guidance_path,
       log,
     });
+    /*
+     * Cache mở SAU khi clone, vì khoá có `revision` — và đó là cả điểm mạnh của
+     * nó: một commit mới là những khoá mới, nên cache không bao giờ trả lời
+     * thay cho code đã đổi.
+     */
+    const cache = selection.cache
+      ? await openCache({ dir: path.join(config.workspaceDir, CACHE_DIRNAME), tenant: selection.tenant, log })
+      : null;
+    /*
+     * Hình dạng prompt: quy ước của codebase đang áp, cộng ba tham số quyết
+     * định model được đọc bao nhiêu code. Vào khoá vì đổi chúng là đổi câu hỏi
+     * — xem chú thích ở `cacheKey`.
+     */
+    const promptShape = JSON.stringify({
+      guidance: guidance || '',
+      context_lines: options.context_lines,
+      max_snippets: options.max_snippets,
+      max_snippet_lines: options.max_snippet_lines,
+    });
+    const keyFor = (ticket) =>
+      cacheKey({
+        repoUrl: body.repo_url,
+        revision: head || '',
+        ticketKey: ticket.key,
+        summary: ticket.summary,
+        description: ticket.description,
+        status: ticket.status,
+        rulesVersion: selection.rulesVersion,
+        model: config.fciModel,
+        prompt: promptShape,
+      });
+
+    /*
+     * Phân loại một lần, trước khi gửi lượt nào.
+     *
+     * Ba rổ: đã chắc ở tầng grep (không gọi model), đã có trong cache (không
+     * gọi model), và phần còn lại — đúng cái phần `progress.total` đếm. Làm
+     * trước thay vì kiểm lẻ trong từng lượt để thanh tiến độ nói đúng ngay từ
+     * dòng đầu, chứ không tụt dần khi job chạy.
+     */
+    const pending = [];
+    for (const ticket of tickets) {
+      if (
+        selection.mode === 'selected' &&
+        ticket.grep_confidence !== null &&
+        ticket.grep_confidence >= selection.skipAbove
+      ) {
+        stats.skipped_sure += 1;
+        counted.skipped += 1;
+        job.results.push({
+          key: ticket.key,
+          tier: 'grep',
+          ...(ticket.grep_verdict ? { verdict: ticket.grep_verdict } : {}),
+          confidence: ticket.grep_confidence,
+          reason: 'đã chắc ở tầng grep',
+          skipped: true,
+        });
+        continue;
+      }
+      const k = cache ? keyFor(ticket) : null;
+      const hit = k ? cache.get(k) : null;
+      if (hit) {
+        stats.cache_hits += 1;
+        counted.cached += 1;
+        // `cached: true` đi kèm để bên gọi phân biệt được "model vừa nói thế"
+        // với "model đã nói thế trên đúng commit này" — cùng một kết luận,
+        // nhưng không cùng một lần xét.
+        job.results.push({ ...hit, cached: true });
+        continue;
+      }
+      pending.push({ ticket, cacheKeyOf: k });
+    }
+    counted.total = pending.length;
+    publish();
+
     log(
       `clone xong: ${tickets.length}/${all.length} ticket để chấm lại, commit ${head || '(không rõ)'} — ` +
         `model ${config.fciModel}, tối đa ${limiter.cap} lượt cùng lúc` +
         (over.length ? `, bỏ qua ${over.length} vì ASTRACODE_MAX_TICKETS=${cap}` : ''),
     );
+    log(
+      `chọn lọc: mode ${selection.mode}` +
+        (selection.skipAbove === null ? '' : ` (skip_above ${selection.skipAbove})`) +
+        ` | cache ${cache ? `bật, tenant ${cache.tenant}, ${cache.loaded} entry` : 'tắt'}` +
+        ` → ${stats.skipped_sure} đã chắc ở tầng grep, ${stats.cache_hits} trúng cache, ` +
+        `${pending.length} lượt phải gọi model`,
+    );
 
-    const one = async (ticket) => {
+    const one = async ({ ticket, cacheKeyOf }) => {
       const at = Date.now();
       try {
         const { snippets, skipped } = await readSnippets({ repoDir, evidence: ticket.evidence, options });
@@ -300,7 +487,7 @@ export async function runJudgeJob({ job, body, config, redact, log, limiter, usa
           return { key: ticket.key, tier: 'grep', error: 'đã dừng trước khi tới lượt' };
         }
         const prompt = buildVerdictPrompt({ ticket, guide, snippets, skipped, guidance });
-        const { text } = await limiter.run(() =>
+        const { text, usage: spent } = await limiter.run(() =>
           askFci({
             config,
             prompt,
@@ -309,18 +496,57 @@ export async function runJudgeJob({ job, body, config, redact, log, limiter, usa
             signal: job.abort?.signal,
             onAttempt: () => {
               usage.model_calls += 1;
+              counted.model_calls += 1;
+              publish();
             },
-            onRetry: ({ status, attempt, of, waitMs, message }) => {
+            onRetry: ({ status, attempt, of, waitMs, source, message }) => {
               stats[status === 429 ? 'hits_429' : 'hits_503'] += 1;
+              if (status === 429) {
+                // `throttled` đếm số lần PHẢI CHỜ vì hạn mức — thứ để trả lời
+                // "chạy chậm vì server hay vì nhà cung cấp đang chặn".
+                stats.throttled += 1;
+                counted.throttled += 1;
+                publish();
+              }
               log(
-                `${ticket.key}: ${status} — chờ ${waitMs / 1000}s rồi thử lại (lần ${attempt}/${of}). ` +
-                  `${message.slice(0, 160)}`,
+                `${ticket.key}: ${status} — chờ ${waitMs / 1000}s rồi thử lại (lần ${attempt}/${of}, ` +
+                  `${source === 'retry-after' ? 'theo Retry-After' : 'theo bảng chờ'}). ${message.slice(0, 160)}`,
               );
             },
           }),
         );
+        // Token của nhà cung cấp, không phải ước lượng của ta. Thiếu field thì
+        // cộng 0: đếm thiếu còn đọc được, đếm bịa thì không.
+        const tin = Number(spent?.prompt_tokens);
+        const tout = Number(spent?.completion_tokens);
+        if (Number.isFinite(tin)) {
+          stats.token_in += tin;
+          counted.token_in += tin;
+        }
+        if (Number.isFinite(tout)) {
+          stats.token_out += tout;
+          counted.token_out += tout;
+        }
         const out = pickVerdict(text, { key: ticket.key, guide });
         stats.judged += 1;
+        if (cache && cacheKeyOf) {
+          // Chỉ lưu lượt THÀNH CÔNG. Một lỗi mạng được cache lại sẽ thành kết
+          // luận vĩnh viễn cho ticket ấy trên commit ấy.
+          stats.cache_writes += 1;
+          await cache.put(
+            cacheKeyOf,
+            {
+              // Ði qua redactor: một `repo_url` có credential nhúng sẵn sẽ nằm
+              // lại trên đĩa rất lâu, khác với một dòng log bảy ngày.
+              repo_url: redact(body.repo_url),
+              revision: job.revision,
+              key: ticket.key,
+              rules_version: selection.rulesVersion || null,
+              model: config.fciModel,
+            },
+            out,
+          );
+        }
         log(
           `${ticket.key} | ${Date.now() - at}ms | ${ticket.grep_verdict || '(grep chưa nói)'} → ${out.verdict} ` +
             `(confidence ${out.confidence === null ? '?' : out.confidence.toFixed(2)}) | ${snippets.length} mảnh code`,
@@ -343,18 +569,25 @@ export async function runJudgeJob({ job, body, config, redact, log, limiter, usa
      * `AbortSignal.timeout` của nó bắt đầu chạy từ lúc tạo chứ không từ lúc
      * limiter cho vào — nên 190 lượt xếp hàng sẽ hết giờ trước khi tới lượt.
      */
-    const queue = tickets.slice();
+    const queue = pending.slice();
     const lanes = Array.from({ length: Math.min(limiter.cap, queue.length) }, async () => {
       for (;;) {
-        const ticket = queue.shift();
-        if (!ticket) return;
+        const item = queue.shift();
+        if (!item) return;
         if (job.abort?.signal?.aborted) return;
-        const result = await one(ticket);
+        const result = await one(item);
         job.results.push(result);
-        job.progress = { done: job.results.length, total: tickets.length };
+        // `done` đếm lượt gọi model đã xong, để nó so được với `total`. Những
+        // dòng bỏ qua và dòng trúng cache đã nằm sẵn trong `results` từ lúc
+        // phân loại, và chúng có ô đếm riêng.
+        counted.done += 1;
+        publish();
       }
     });
     await Promise.all(lanes);
+    // Ghi nốt những gì còn xếp hàng: kết quả phải nằm trên đĩa trước khi job
+    // đóng sổ, không thì một lần chạy lại ngay sau đó vẫn phải trả tiền.
+    await cache?.flush();
 
     // Những ticket vượt trần vẫn có mặt trong kết quả. Bỏ hẳn chúng sẽ khiến
     // bên gọi tưởng job đã xét tới, rồi không hiểu vì sao phần còn lại của
@@ -365,14 +598,18 @@ export async function runJudgeJob({ job, body, config, redact, log, limiter, usa
         tier: 'grep',
         error: `chưa xét: vượt trần ASTRACODE_MAX_TICKETS=${cap}`,
       });
-      job.progress = { done: job.results.length, total: all.length };
     }
+    publish();
 
     stats.duration_ms = Date.now() - startedAt;
     stats.cancelled = Boolean(job.abort?.signal?.aborted);
     log(
       `job judge xong${stats.cancelled ? ' (đã dừng theo yêu cầu)' : ''}: ${stats.judged} chấm lại, ` +
-        `${stats.failed} hỏng, ${stats.no_snippet} không có mảnh code | ${stats.duration_ms}ms`,
+        `${stats.cache_hits} lấy từ cache, ${stats.skipped_sure} bỏ qua vì đã chắc, ` +
+        `${stats.failed} hỏng, ${stats.no_snippet} không có mảnh code | ` +
+        `token ${stats.token_in} vào / ${stats.token_out} ra` +
+        (stats.throttled ? `, ${stats.throttled} lần bị 429 chặn` : '') +
+        ` | ${stats.duration_ms}ms`,
     );
     return {
       run_id: body.run_id ?? null,
