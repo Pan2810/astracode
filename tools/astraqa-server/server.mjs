@@ -17,7 +17,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs/promises';
-import { randomUUID, timingSafeEqual } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { makeRedactor, redactMessage } from './lib/redact.mjs';
 import { loadDotEnv } from './lib/env.mjs';
@@ -27,6 +27,7 @@ import { createRunLog, bannerLines } from './lib/observe.mjs';
 import { createLimiter } from './lib/limit.mjs';
 import { createAdminRoutes } from './lib/admin.mjs';
 import { createDailyLog } from './lib/daily.mjs';
+import { bearerOf, createAdminAuth, sameSecret } from './lib/adminAuth.mjs';
 import { TIGHTEN_MODE } from './lib/candidates.mjs';
 import { parseTickets } from './lib/tickets.mjs';
 
@@ -124,24 +125,10 @@ function sendJson(res, code, obj) {
   res.end(payload);
 }
 
-/** So sánh token theo thời gian hằng — độ dài lệch thì thôi khỏi so. */
-function tokenOk(given, expected) {
-  const a = Buffer.from(given ?? '', 'utf8');
-  const b = Buffer.from(expected ?? '', 'utf8');
-  if (a.length !== b.length || a.length === 0) return false;
-  return timingSafeEqual(a, b);
-}
-
 /** IP của bên gọi. `::ffff:127.0.0.1` rút về `127.0.0.1` cho dễ đọc. */
 function clientIp(req) {
   const raw = req.socket?.remoteAddress ?? '?';
   return String(raw).replace(/^::ffff:/, '');
-}
-
-function bearerOf(req) {
-  const h = req.headers.authorization ?? '';
-  const m = /^Bearer\s+(.+)$/i.exec(String(h).trim());
-  return m ? m[1].trim() : '';
 }
 
 function readBody(req) {
@@ -179,6 +166,8 @@ export function createServer(config, { log = console.log, persist = true } = {})
   // lại, chỉ là "phiên này đã bắn bao nhiêu viên".
   const usage = { model_calls: 0, jobs: 0 };
 
+  const adminAuth = createAdminAuth({ serviceToken: config.serviceToken, devMode });
+
   // Trang theo dõi chỉ đọc. Toàn bộ logic nằm ở lib/admin.mjs; ở đây chỉ nối dây.
   const handleAdmin = createAdminRoutes({
     jobs,
@@ -190,26 +179,10 @@ export function createServer(config, { log = console.log, persist = true } = {})
     usage,
     runsDir,
     redact: baseRedact,
-    /*
-     * `/admin` đòi token y như mọi route khác.
-     *
-     * Trước đây loopback được miễn, với lý do thật: trình duyệt KHÔNG gắn
-     * `Authorization` vào một lần điều hướng thường, nên bắt token là biến trang
-     * theo dõi thành thứ không mở được bằng cách mở nó. Nhưng "đến được cổng
-     * này" chỉ đồng nghĩa với "đang ngồi trước máy này" khi không có gì khác
-     * trên máy — mà một trang liệt kê mọi job, mọi repo và mọi ticket thì bất
-     * kỳ thứ gì chạy trên localhost cũng đọc được, kể cả một tab đang mở một
-     * trang web lạ.
-     *
-     * Hệ quả nói thẳng: khi SERVICE_TOKEN đã đặt, mở `/admin` bằng thanh địa
-     * chỉ sẽ nhận 401. Cách xem là gửi kèm header — `curl -H "Authorization:
-     * Bearer $ASTRACODE_SERVICE_TOKEN" .../admin` — hoặc chạy không token trên
-     * máy của mình, khi đó `devMode` bên dưới mở nó ra.
-     *
-     * `devMode` là khi CHƯA đặt token: không có gì để đòi, và một server không
-     * token thì mọi route của nó đã mở sẵn rồi.
-     */
-    isAuthorized: (req) => devMode || tokenOk(bearerOf(req), config.serviceToken),
+    // Một lần Bearer đúng mở ra mười lăm phút bằng cookie HttpOnly, chỉ cho
+    // GET. Toàn bộ luật ở lib/adminAuth.mjs, gồm cả lý do loopback không còn
+    // được miễn token.
+    isAuthorized: adminAuth.authorize,
   });
   // Dòng nào không thuộc job nào — banner, dòng request, 401, 404 — vừa ra
   // console vừa xuống `logs/server-<ngày>.log`, và bảy ngày là hạn. Xem
@@ -331,7 +304,7 @@ export function createServer(config, { log = console.log, persist = true } = {})
     // rơi tiếp xuống y như cũ.
     if (await handleAdmin(req, res, route)) return;
 
-    if (!devMode && !tokenOk(bearerOf(req), config.serviceToken)) {
+    if (!devMode && !sameSecret(bearerOf(req), config.serviceToken)) {
       // Ghi lại để biết có ai gõ cửa sai token — tuyệt đối không ghi token đã gửi.
       slog(`401 ${req.method} ${route} ← ${clientIp(req)}`);
       return sendJson(res, 401, { error: 'unauthorized: thiếu hoặc sai Authorization: Bearer <ASTRACODE_SERVICE_TOKEN>' });

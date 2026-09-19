@@ -287,6 +287,11 @@ cũ dưới một cái nhãn sai. Thiếu `FPT_*` thì job `failed` ngay và nó
   curl -s -H "Authorization: Bearer $ASTRACODE_SERVICE_TOKEN" http://127.0.0.1:8000/admin
   ```
 
+  Một lần Bearer đúng thì server đặt cookie `astracode_admin` — HttpOnly, SameSite=Strict,
+  **15 phút**, **chỉ cho GET**, và giá trị là chuỗi ngẫu nhiên chứ không phải service token —
+  nên sau lần curl đó, mở `/admin` bằng thanh địa chỉ trong 15 phút là được. Hết hạn thì
+  curl lại một lần. Xem `lib/adminAuth.mjs`.
+
   Chưa đặt token thì server ở chế độ dev và mọi route của nó đã mở sẵn, `/admin` cũng vậy.
   `/healthz` luôn mở: nó là cổng cho liveness probe.
 - **Log của server xuống đĩa theo ngày, giữ 7 ngày.** Dòng nào không thuộc job nào — banner,
@@ -302,7 +307,7 @@ cd tools/astraqa-server
 node --test test/*.test.mjs
 ```
 
-153 test, **không cần mạng, không cần gateway, không tốn token**: repo git thật được dựng
+161 test, **không cần mạng, không cần gateway, không tốn token**: repo git thật được dựng
 trong thư mục tạm, backend `cli` đóng thế bằng `test/fakeCli.mjs`, backend `fci` đóng thế
 bằng một endpoint OpenAI-compatible dựng tại chỗ — nhưng đi qua đúng mọi bước mà bản chạy
 thật đi.

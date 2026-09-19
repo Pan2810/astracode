@@ -357,8 +357,9 @@ const PAGE = `<!doctype html>
  * Bốn route đọc + trang HTML. Trả `true` nếu đã xử lý request, `false` để
  * server tiếp tục các route cũ của nó.
  *
- * `isAuthorized(req)` do server truyền vào — xem ghi chú ở `server.mjs` về việc
- * vì sao loopback KHÔNG còn được miễn token.
+ * `isAuthorized(req, res)` do server truyền vào — xem `lib/adminAuth.mjs`: vì
+ * sao loopback KHÔNG còn được miễn token, và vì sao một lần Bearer đúng lại đặt
+ * một cookie. Nó nhận `res` chính vì việc đặt cookie đó.
  */
 export function createAdminRoutes({
   jobs,
@@ -403,7 +404,7 @@ export function createAdminRoutes({
       sendJson(res, 405, { error: 'trang admin chỉ đọc — chỉ nhận GET' });
       return true;
     }
-    if (!isAuthorized(req)) {
+    if (!isAuthorized(req, res)) {
       denied(req, route);
       sendJson(res, 401, { error: 'unauthorized: cần Authorization: Bearer <ASTRACODE_SERVICE_TOKEN>' });
       return true;

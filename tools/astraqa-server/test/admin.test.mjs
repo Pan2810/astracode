@@ -294,6 +294,27 @@ test('/admin không token → 401, kể cả từ chính máy này', async () =>
   assert.equal((await fetch(`${base}/healthz`)).status, 200);
 });
 
+test('một lần Bearer đúng đặt cookie, và cookie mở được /admin bằng trình duyệt', async () => {
+  // Đây là đường đi thật của một người: gửi Bearer một lần (curl, hoặc một
+  // extension gắn header), rồi mở trang bằng thanh địa chỉ — trình duyệt không
+  // gắn Authorization vào một lần điều hướng, nhưng nó gắn cookie.
+  const first = await adminFetch(`${base}/admin`);
+  assert.equal(first.status, 200);
+  const raw = first.headers.get('set-cookie');
+  assert.ok(raw, 'Bearer đúng phải đặt cookie');
+  assert.match(raw, /HttpOnly/i);
+  assert.ok(!raw.includes(TOKEN), 'cookie mang chính service token');
+
+  const jar = raw.split(';')[0];
+  const second = await fetch(`${base}/admin`, { headers: { cookie: jar } });
+  assert.equal(second.status, 200, 'cookie phải mở được trang');
+  assert.match(await second.text(), /<style>/);
+
+  // Và chỉ mở đường đọc: cổng trả false, nên route rơi xuống 405 của chính nó.
+  const written = await fetch(`${base}/api/v1/jobs`, { method: 'POST', headers: { cookie: jar } });
+  assert.ok(written.status === 401 || written.status === 405, `POST bằng cookie: ${written.status}`);
+});
+
 test('gọi từ máy khác (không loopback) thì phải có token', async () => {
   // Giả bên gọi ở xa bằng cách thay `remoteAddress` của socket trước khi route chạy.
   const s = createServer(
