@@ -17,6 +17,11 @@ evals/results/
 # Log của AstraCode (đã redact nhưng vẫn không thuộc về repo)
 .astra/logs/
 
+# AstraQA-server runtime diagnostics. These files are generated locally and
+# may contain request context, repository paths, or redacted model evidence.
+tools/astraqa-server/*.log
+tools/astraqa-server/traces/
+
 # B?n sao workspace c?a skill chat-verify ? khong thu?c v? repo
 .verify-baseline/
 

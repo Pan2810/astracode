@@ -29,6 +29,10 @@ describe('AgentTrace', () => {
         'session_started', 'turn_started', 'loop_started', 'tool_started', 'tool_finished', 'loop_response', 'turn_finished',
       ]);
       const tool = rows.find((row) => row.type === 'tool_finished');
+      const start = rows.find((row) => row.type === 'tool_started');
+      expect(start.action).toBe('read_file src/login.ts');
+      expect(tool.status).toBe('ok');
+      expect(tool.result_summary).toContain('[REDACTED:');
       expect(tool.result_chars).toBeGreaterThan(0);
       expect(tool.result_excerpt).toBeUndefined();
       expect(tool.result_sha256).toMatch(/^[a-f0-9]{64}$/);
