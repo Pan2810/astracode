@@ -136,6 +136,58 @@ test('judge endpoint uses CLI and reads the pinned source SHA', async () => {
   assert.equal(done.results[0].tier, 'ai');
 });
 
+test('CLI judge supports selection and caches verdicts without dropping acceptance criteria', async () => {
+  const repoUrl = await makeRepo('repo-cli-cache', { 'src/order.ts': 'export const orders = [];\n' });
+  const body = {
+    repo_url: repoUrl, verdict_guide: { MATCH: 'signals agree' },
+    mode: 'selected', skip_above: 0.9, tenant: 'cli-merge',
+    tickets: [
+      { key: 'K-SKIP', grep_confidence: 0.95, grep_verdict: 'MATCH' },
+      { key: 'K-CLI', summary: 'Create order', acceptance_criteria: ['Returns 201'],
+        evidence: [{ path: 'src/order.ts', lines: '1' }] },
+    ],
+  };
+  const judge = async () => {
+    const res = await fetch(`${base}/api/v1/judge`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
+      body: JSON.stringify(body),
+    });
+    assert.equal(res.status, 202);
+    const done = await pollJudge((await res.json()).job_id);
+    assert.equal(done.status, 'succeeded', done.error);
+    return done;
+  };
+  const first = await judge();
+  assert.equal(first.progress.model_calls, 1);
+  assert.equal(first.progress.skipped, 1);
+  assert.equal(first.results.find((row) => row.key === 'K-CLI').tier, 'ai');
+  const cached = await judge();
+  assert.equal(cached.progress.model_calls, 0);
+  assert.equal(cached.progress.cached, 1);
+  body.tickets[1].acceptance_criteria = ['Returns 400'];
+  const changed = await judge();
+  assert.equal(changed.progress.model_calls, 1);
+  assert.equal(changed.progress.cached, 0);
+});
+
+test('structured tickets combine subset filtering with unassessed acceptance criteria', async () => {
+  const repoUrl = await makeRepo('repo-structured-subset', { 'src/order.ts': 'export const orders = [];\n' });
+  const res = await post({ repo_url: repoUrl, tickets_schema_version: 1, tickets_subset: ['A-1'],
+    tickets: [
+      { key: 'A-1', summary: 'Create order', acceptance_criteria: ['Returns 201'] },
+      { key: 'B-1', summary: 'Reject order', acceptance_criteria: ['Returns 400'] },
+    ],
+  });
+  assert.equal(res.status, 202);
+  const done = await poll((await res.json()).job_id);
+  assert.equal(done.status, 'succeeded', done.error);
+  assert.equal(done.result.stats.judge_calls, 1);
+  const skipped = done.result.items.find((row) => row.key === 'B-1');
+  assert.equal(skipped.reason, 'not_in_subset');
+  assert.equal(skipped.assessment.state, 'not_assessed');
+  assert.equal(skipped.mapping_state, 'unlinked');
+});
+
 test('structured tickets run through the server with distinct keys and AC', async () => {
   const repoUrl = await makeRepo('repo-structured', { 'src/orders.ts': 'export const orders = [];\n' });
   const res = await post({

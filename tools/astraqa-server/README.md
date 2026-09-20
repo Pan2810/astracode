@@ -24,11 +24,12 @@ Server tự nạp `.env` ở gốc repo (và `.env.local`) theo đúng quy ướ
 |---|---|---|---|
 | `PORT` | không | `8000` | Cổng nghe, bind `127.0.0.1` |
 | `WORKSPACE_DIR` | không | `<tmp>/astracode-astraqa` | Nơi clone repo tạm. Mỗi job một thư mục con, **xoá khi job kết thúc** (kể cả khi lỗi). Đường dẫn tương đối được resolve về tuyệt đối theo cwd lúc khởi động; tạo/ghi không được thì server DỪNG |
-| `ASTRACODE_SERVICE_TOKEN` | **nên có** | rỗng | Token AstraQA phải gửi. **Rỗng = chế độ dev, bỏ kiểm xác thực**, có một dòng cảnh báo lúc khởi động |
+| `ASTRACODE_SERVICE_TOKEN` | **nên có** | rỗng | Token AstraQA phải gửi, và `/admin` cũng đòi nó (kể cả từ loopback). **Rỗng = chế độ dev, bỏ kiểm xác thực**, có một dòng cảnh báo lúc khởi động |
 | `ASTRACODE_JUDGE` | không | `fci` | `fci` \| `cli` \| `none` — xem "Ba backend" bên dưới |
 | `FPT_BASE_URL` | khi `fci` | — | Gốc endpoint OpenAI-compatible, **kèm `/v1`** |
 | `FPT_API_KEY` | khi `fci` | — | Gửi trong `Authorization: Bearer`. **Không bao giờ được in ra log** — log chỉ nói "có/KHÔNG" |
 | `FPT_MODEL` | khi `fci` | — | Ví dụ `Qwen3.8-27B` |
+| `ASTRACODE_JUDGE_CONCURRENCY` | không | `2` | Trần lượt gọi model chạy cùng lúc trên **cả server**. `POST /api/v1/judge` chạy song song tới đúng con số này; hạn mức tính theo API key mà key thì cả server dùng chung, nên trần ở đây chứ không ở từng job. **Với endpoint FPT nên đặt `8`** — nó chịu được, và 190 ticket ở mức 2 thì chạy lâu gấp bốn mà không đổi được gì ở phía nhà cung cấp. Gặp `429` thì server tự lùi theo `Retry-After`, nên đặt cao không phải là đánh cược. Banner lúc khởi động nhắc lại nếu đang để thấp hơn 8 |
 | `ASTRACODE_CLI_PATH` | khi `cli` | `<repo>/packages/cli/dist/main.js` | Trỏ vào `test/fakeCli.mjs` để chạy thử không tốn LLM |
 | `ASTRAWORK_JWT` | khi `cli` | rỗng | JWT AstraWork. Request có `astrawork_token` thì dùng cái đó, không thì rơi về biến này |
 
@@ -137,11 +138,67 @@ Liveness: `curl -sS http://127.0.0.1:8000/healthz` → `{"status":"ok","backend"
 `POST /api/v1/analyze` → `202 {"job_id","status":"queued"}`. Thiếu `repo_url` hoặc
 `tickets_md` → `400` kèm tên field thiếu. Sai/thiếu token → `401`.
 
+Hai field tuỳ chọn làm mỏng một job:
+
+| Field | Là gì |
+|---|---|
+| `tickets_subset` | Mảng ticket key. **Chỉ quét evidence cho những key này**; repo vẫn clone đủ |
+| `base_revision` | Mốc so sánh. Có thì kết quả mang thêm `changed_files[]` = `git diff --name-only base..HEAD` |
+
+### `tickets_subset` — quét ít, vẫn trả đủ bảng
+
+Thứ đắt trong một job không phải bản clone mà là những lượt quét và những lượt gọi
+model. Bên gọi đã biết 184 ticket kia không đổi gì từ lần chạy trước thì không có lý do
+bắt server chấm lại chúng.
+
+Ticket ngoài tập **không biến mất khỏi `items`** — chúng về với `reason: "not_in_subset"`,
+`code_status: "missing"`, `confidence: 0`, `scan: null`. Cùng một luật với
+`skipped_quota_limit`: một ticket vắng mặt trông y như một ticket đã xét và không thấy
+gì, và bỏ hẳn nó đi sẽ khiến AstraQA đọc bảng thành "`tickets_md` chỉ có bấy nhiêu".
+`report_md` gọi những dòng ấy là **KHÔNG QUÉT**, khác chữ **BỎ QUA** của trần hạn mức.
+
+Thứ tự hai phép lọc là có chủ ý: **tập con của bên gọi áp trước**, `ASTRACODE_MAX_TICKETS`
+áp sau. Ðảo lại thì bên gọi xin 6 ticket cuối bảng sẽ nhận về không ticket nào mà không
+có gì nói vì sao.
+
+Mảng rỗng → `400` (gửi mảng rỗng nghĩa là không quét gì; bỏ hẳn field nếu muốn quét tất
+cả). Key không có trong `tickets_md` → chỉ là **cảnh báo**: nó thường là ticket vừa bị
+xoá bên kế hoạch.
+
+### `base_revision` — những tệp đã đổi từ mốc ấy
+
+Bản clone là `--depth 1` nên `base` gần như chắc chắn chưa có mặt. Server đào thêm lịch
+sử theo đúng thứ tự từ rẻ tới đắt, kiểm lại sau mỗi lần và dừng ngay khi đủ: `fetch
+origin <base>` → `--deepen 100` → `--deepen 500` → `--unshallow`.
+
+Ba trạng thái, phân biệt bằng đúng hai field:
+
+| | `base_revision` (trả về) | `changed_files` | cảnh báo |
+|---|---|---|---|
+| Không hỏi | `null` | `null` | không |
+| Hỏi, lấy được | `<sha đầy đủ>` | `["src/a.py", …]` | không |
+| Hỏi, không thấy | `null` | `null` | **có** |
+
+`changed_files` là `null` chứ không phải `[]` khi không biết: một mảng rỗng là câu trả
+lời "không tệp nào đổi", và hai chuyện ấy khác nhau.
+
+**Base không tìm thấy KHÔNG phải lỗi.** Nó là thứ bên gọi nhớ từ lần chạy trước — có thể
+đã bị force-push đè, có thể thuộc một fork, có thể gõ nhầm. Ðánh hỏng cả job vì chuyện ấy
+là vứt đi 184 lượt phân tích đã chạy xong để đổi lấy một danh sách tệp phụ trợ. Sai
+**kiểu** (`tickets_subset` không phải mảng, `base_revision` không phải chuỗi) thì vẫn là
+`400` ngay, vì đó là sai ở phía người gửi.
+
+Kết quả job mang thêm `warnings: []` — luôn có mặt, mảng rỗng khi không có gì, để bên gọi
+không phải phân biệt "không có cảnh báo" với "bản server này chưa biết field ấy". Cảnh
+báo cũng hiện thành một khối `> **Cảnh báo:**` ở đầu `report_md`.
+
 `GET /api/v1/analyze/{job_id}` → một trong:
 
 ```json
 {"status":"running",   "progress":{"done":3,"total":10}, "current":"WEB-1001"}
-{"status":"succeeded", "result":{ "run_id":…, "generated_at":…, "items":[…], "report_md":… }}
+{"status":"succeeded", "result":{ "run_id":…, "generated_at":…, "source_revision":…,
+                                  "base_revision":…, "changed_files":…, "warnings":[],
+                                  "items":[…], "report_md":… }}
 {"status":"failed",    "error":"<message đã che token>"}
 ```
 
@@ -159,6 +216,244 @@ Một `item`:
   "reason": "matched_by_key"
 }
 ```
+
+## Tầng judge — `POST /api/v1/judge`
+
+Ðường thứ hai, và nó trả lời một câu hỏi khác. `analyze` đi tìm: nó tự dò cả repo để
+đoán file nào liên quan tới ticket. `judge` soát lại: bên gọi **đã có bằng chứng** — từ
+tầng khớp từ khoá của chính nó, hay từ một lần `analyze` trước — và gửi kèm `path` +
+`lines`; việc của job này là ÐỌC đúng những dòng ấy rồi chọn kết luận.
+
+Ba điểm khác `analyze`, và cả ba là lý do nó là một đường riêng:
+
+| | `analyze` | `judge` |
+|---|---|---|
+| Model thấy gì | cây file đã lọc + các dòng khớp từ khoá | ÐÚNG các dòng bên gọi trích, kèm ngữ cảnh hai phía |
+| Chạy | tuần tự (để `done/total` có nghĩa) | song song tới `ASTRACODE_JUDGE_CONCURRENCY` lượt |
+| Ðọc kết quả | chờ cả job, rồi `result` | `results[]` **lớn dần**, đọc được giữa lúc chạy |
+
+**Từ vựng kết luận đến từ request.** Server không có tên verdict nào của riêng nó và
+không được có: `verdict_guide` là một object `{TÊN: "định nghĩa"}` do bên gọi cấp, nó đi
+thẳng vào prompt bằng chính câu chữ ấy, và một câu trả lời nằm ngoài danh sách bị từ
+chối. Ðổi cách gọi ở bên kia không phải sửa gì ở đây.
+
+Judge dùng backend `fci` hoặc `cli` theo `ASTRACODE_JUDGE`. Cả hai giữ bộ lọc,
+cache, tiến độ và kết quả từng phần. `tickets[].acceptance_criteria` được đưa vào
+prompt; `ref` là SHA đầy đủ thì judge đọc đúng commit đó. Backend `cli` tiếp tục
+nhận guide có một verdict; backend `fci` yêu cầu ít nhất hai verdict.
+
+**`guidance_path` — quy ước riêng của codebase.** Một đường dẫn, không phải nội dung:
+tệp nằm trong repo job này sắp clone, nên gửi nội dung xuống nghĩa là bên gọi giữ một
+bản sao của một tệp nó không bao giờ đọc, và bản sao ấy sẽ lệch với nhánh mà judge
+thật sự đọc. Ðường dẫn do bên gọi đưa chứ AstraCode không tự tìm, vì bộ rules đang áp
+có thể ở cấp tenant chứ không nằm trong repo — chỉ bên kia biết bộ nào đang thắng.
+
+Nội dung tệp được nối vào prompt SAU danh sách kết luận và TRƯỚC ticket: nó giải thích
+cách đọc mã nguồn này, chứ không được thêm hay đổi nghĩa một kết luận nào. Một tệp bảo
+model trả về tên khác vẫn bị chặn ở chỗ cũ. Ðường dẫn leo ra ngoài bản clone thì không
+mở; đọc hỏng thì thôi, vì thiếu quy ước làm câu trả lời nghèo đi chứ không làm nó sai.
+
+```bash
+curl -sS -X POST http://127.0.0.1:8000/api/v1/judge \
+  -H "Authorization: Bearer $ASTRACODE_SERVICE_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "run_id": "RUN-1",
+    "repo_url": "https://github.com/org/repo.git",
+    "ref": "",
+    "tickets": [
+      {
+        "key": "WEB-1001",
+        "summary": "Ðăng nhập bằng mật khẩu",
+        "status": "done",
+        "grep_verdict": "CODE_AHEAD",
+        "grep_reason": "matched_by_key",
+        "evidence": [{ "path": "src/login.ts", "lines": "120-148" }]
+      }
+    ],
+    "verdict_guide": {
+      "MATCH": "kế hoạch và mã nguồn nói cùng một chuyện",
+      "CODE_AHEAD": "mã đã có, ticket chưa đóng",
+      "JIRA_AHEAD": "ticket đã đóng, mã chưa thấy",
+      "NO_EVIDENCE": "không tìm được gì kiểm chứng được"
+    }
+  }'
+```
+
+→ `202 {"job_id","status":"queued","total":1}`. Thiếu `repo_url`, `tickets` (mảng rỗng
+cũng tính là thiếu) hoặc `verdict_guide` → `400` kèm tên field thiếu.
+
+### Chọn lọc và cache — bốn field làm mỏng hoá đơn
+
+Một lượt judge là một lượt gọi model. Bốn field dưới đây quyết định lượt nào thật sự
+được gửi đi; tất cả đều tuỳ chọn, và tất cả đều được kiểm ngay ở request (`400` kèm tên
+field) chứ không để job tự chết giữa chừng.
+
+| Field | Mặc định | Là gì |
+|---|---|---|
+| `mode` | `"full"` | `"full"` xét mọi ticket; `"selected"` bỏ qua ticket mà tầng grep đã đủ chắc |
+| `skip_above` | — | Ngưỡng trong `(0, 1]`. Ticket có `grep_confidence >= skip_above` thì **không** gọi model |
+| `cache` | `true` | Dùng lại kết luận đã lưu cho đúng câu hỏi ấy |
+| `rules_version` | `""` | Phiên bản bộ rules đang áp. Nằm trong khoá cache: đổi rules là câu hỏi khác |
+| `tenant` | `"default"` | Tách tệp cache theo đội |
+
+Hai tổ hợp bị từ chối bằng `400`, và đó là chủ ý: `mode: "selected"` thiếu `skip_above`
+(không có ngưỡng thì không biết thế nào là "đã chắc"), và `skip_above` gửi kèm
+`mode: "full"` — bị lờ đi im lặng nghĩa là bên gọi tưởng mình đang tiết kiệm trong khi
+hoá đơn vẫn đầy đủ.
+
+Ticket bị bỏ qua **vẫn có mặt trong `results`**, dạng:
+
+```json
+{ "key": "WEB-1001", "tier": "grep", "verdict": "CODE_AHEAD", "confidence": 0.95,
+  "reason": "đã chắc ở tầng grep", "skipped": true }
+```
+
+Chú ý nó **không** có `error`. `tier: "grep"` kèm `error` là "đã thử và không kết luận
+được"; `tier: "grep"` kèm `skipped: true` là "không cần thử". Hai chuyện khác nhau, và
+đọc lẫn nhau thì một bảng 190 dòng trông như 190 lượt hỏng.
+
+### Cache judge — khoá đã bao commit, nên không có TTL
+
+Khoá của một entry gồm:
+
+```
+repo_url + revision + ticket key + hash(summary + description + status)
+         + rules_version + model + dấu vân tay của prompt
+```
+
+"Dấu vân tay của prompt" là quy ước codebase đang áp (`guidance_path`) cộng ba tham số
+`context_lines` / `max_snippets` / `max_snippet_lines`, backend, verdict guide,
+acceptance criteria, dẫn chứng và kết luận sơ bộ. Nó có mặt vì cùng một ticket trên
+cùng một commit vẫn là hai câu hỏi khác nhau nếu prompt khác: bên gọi nới `max_snippets`
+đúng lúc họ muốn một câu trả lời tốt hơn, và trả lại kết luận rẻ tiền của lần trước là
+kiểu hỏng không ai nhìn thấy.
+
+Ðổi bất kỳ thành phần nào là một khoá khác. Vì `revision` nằm trong khoá, **cache không
+bao giờ trả lời thay cho code đã đổi** — một commit mới luôn là miss. Cũng vì thế không
+có TTL: một entry sáu tháng vẫn trả lời đúng câu hỏi của nó, vì commit ấy vẫn là commit
+ấy. Hết hạn theo thời gian ở đây chỉ tạo ra những lượt gọi lại không đổi kết quả.
+
+Chỗ lưu: `<WORKSPACE_DIR>/judge-cache/<tenant>.jsonl` (tên tenant được lọc về ký tự an
+toàn; nếu phép lọc làm mất ký tự nào thì tên tệp mang thêm tám ký tự băm, để `"Đội A"` và
+`"Nội A"` không dùng chung một tệp), mỗi entry một dòng JSON, append
+thêm chứ không sửa. Một job bị giết giữa lúc ghi chỉ làm dở dòng cuối, và dòng hỏng bị
+bỏ qua lúc nạp. **Chỉ lượt thành công được lưu**: một lỗi mạng mười giây mà vào cache sẽ
+thành kết luận vĩnh viễn cho ticket ấy trên commit ấy.
+
+Dòng trúng cache trả về đúng kết luận cũ, kèm `"cached": true` — cùng một kết luận,
+nhưng không cùng một lần xét, và bên gọi có quyền biết điều đó.
+
+Dọn đĩa (việc duy nhất phải làm tay):
+
+```bash
+curl -sS -X DELETE "http://127.0.0.1:8000/api/v1/judge/cache?older_than=30d"   -H "Authorization: Bearer $ASTRACODE_SERVICE_TOKEN"
+# → {"older_than":"30d","files":2,"kept":412,"removed":88}
+```
+
+`older_than` nhận `<số><s|m|h|d>` và **bắt buộc**: dọn mù cả cache là vứt đi tiền đã
+trả, nên nó phải được nói ra. Dung lượng đang chiếm khai ở `/healthz`:
+
+```json
+"judge_cache": { "tenants": 2, "entries": 500, "bytes": 184320 }
+```
+
+(`entries: null` nghĩa là có tệp quá lớn nên không đếm dòng — một liveness probe không
+được phép đọc 50 MB mỗi lần gọi.)
+
+### Prompt: gọn có chủ ý
+
+Mặc định gửi cho model là **3 mảnh code, mỗi mảnh ±20 dòng quanh dòng khớp** (trần 41
+dòng), và phần mô tả ticket cắt ở **600 ký tự** kèm ghi chú đã cắt. Bản đầu (12 dòng ngữ
+cảnh, 6 mảnh, 120 dòng mỗi mảnh) cho một ticket mang tới 720 dòng vào prompt, trong khi
+thứ quyết định verdict gần như luôn nằm ở vài chục dòng quanh chỗ khớp.
+
+Ðo trên một ticket 6 dẫn chứng, mỗi dẫn chứng trích 160 dòng: **9 695 → 2 046 token
+(giảm 78.9%)**. `test/promptBudget.test.mjs` canh ngưỡng 40%; xuống dưới ngưỡng thì ca
+ấy rơi để có người xem lại. Bên gọi vẫn nới lại được cho một job riêng bằng `options`
+(`context_lines`, `max_snippets`, `max_snippet_lines`) — nhưng mặc định phải là bản rẻ,
+vì mặc định mới là thứ chạy 190 lần mỗi đêm.
+
+### 429: chờ theo `Retry-After`, không đoán
+
+Gặp `429` (hoặc `503`), server chờ rồi thử lại tối đa 4 lần — tức **tối đa 5 lượt gọi**
+cho một ticket. Thời gian chờ lấy từ header `Retry-After` nếu nhà cung cấp gửi (số giây
+hoặc một mốc thời gian); không có thì rơi về bảng **1s/2s/4s/8s**. `Retry-After` đòi chờ
+quá 60 giây thì bỏ, vì chờ chừng ấy là treo cả job còn AstraQA chạy lại rẻ hơn.
+
+Mỗi lần phải chờ vì `429` được đếm vào `progress.throttled` — thứ trả lời câu "chạy chậm
+vì server hay vì nhà cung cấp đang chặn".
+
+## `.astraqa/rules.yml` — tệp rules của đội
+
+`analyze` đọc `.astraqa/rules.yml` (hoặc `.yaml`) ở gốc bản clone và trả **nguyên văn**
+trong `repo_rules`. AstraCode không hiểu nội dung tệp này và không được hiểu: luật
+verdict nằm bên AstraQA, và một bộ luật thứ hai đọc cùng một tệp theo cách hơi khác là
+cách nhanh nhất để hai bên nói hai điều khác nhau về cùng một dòng. Ở đây chỉ có ba
+việc: tệp có không, nó bao nhiêu byte, nội dung là gì.
+
+```json
+"repo_rules": {
+  "path": ".astraqa/rules.yml",
+  "bytes": 312,
+  "text": "done_means:\n  - done\n",
+  "too_big": false,
+  "guidance": { "path": ".astraqa/judge.md", "bytes": 91, "text": "…" }
+}
+```
+
+`null` khi repo không có tệp, và **`null` khác một tệp rỗng**: tệp rỗng là đội đã nói
+"dùng mặc định", không có tệp là đội chưa nói gì và bộ luật cấp tenant mới được lên
+tiếng. Gộp hai cái làm một là âm thầm đổi bộ luật đang áp.
+
+Trần 256 KB. Vượt trần thì `too_big: true` và `text` rỗng — không cắt bớt, vì một tệp
+rules bị cắt giữa chừng vẫn parse được và sẽ quyết verdict bằng một nửa bộ luật.
+
+`GET /api/v1/judge/{job_id}` → luôn cùng một hình dạng, ở mọi trạng thái:
+
+```json
+{
+  "status": "running|succeeded|failed",
+  "done": 12,
+  "total": 40,
+  "progress": {
+    "done": 12, "total": 40, "skipped": 150, "cached": 30,
+    "model_calls": 13, "token_in": 24180, "token_out": 5210, "throttled": 1
+  },
+  "source_revision": "<sha đã clone>",
+  "results": [
+    { "key": "WEB-1001", "verdict": "MATCH", "confidence": 0.82, "reason": "…", "tier": "ai" },
+    { "key": "WEB-1002", "verdict": "CODE_AHEAD", "reason": "đã chắc ở tầng grep", "tier": "grep", "skipped": true },
+    { "key": "WEB-1003", "verdict": "MATCH", "confidence": 0.82, "tier": "ai", "cached": true },
+    { "key": "WEB-1004", "tier": "grep", "error": "…" }
+  ],
+  "stats": { "judged": 11, "failed": 1, "no_snippet": 0, "hits_429": 0, "duration_ms": 41230 }
+}
+```
+
+**`total` là số lượt THẬT SỰ gọi model**, không phải số ticket gửi lên. Một job 190
+ticket mà 150 đã chắc ở tầng grep và 30 trúng cache thì chỉ còn 10 lượt phải chờ — một
+thanh tiến độ chạy tới 190 ở đó là thanh sai, và nó sai theo hướng làm người ngồi xem
+tưởng còn lâu mới xong. Số dòng đã có nằm ở `results.length`; `202` lúc tạo job vẫn trả
+`total` bằng số ticket gửi lên, vì lúc ấy chưa clone nên chưa biết cái nào trúng cache.
+
+`token_in`/`token_out` là số nhà cung cấp trả về (`usage`), không phải ước lượng của
+server. `model_calls` đếm cả lượt thử lại, vì mỗi lần thử lại cũng là một request thật.
+
+`results` trả về kể cả khi `status` là `failed`: một job chết ở ticket thứ 150 vẫn đã
+chấm xong 149 ticket, và những kết luận ấy đúng như nhau dù cái thứ 150 có hỏng. Giấu
+chúng đi vì trạng thái cuối xấu là bắt bên gọi tiêu lại 149 lượt model.
+
+**`tier: "grep"` nghĩa là "giữ nguyên kết luận của tầng trước".** Một dòng như thế luôn
+kèm `error` nói vì sao, và có đúng ba nguyên nhân: lượt gọi model hỏng (mạng, 4xx, hết
+giờ), model trả về một verdict không có trong `verdict_guide`, hoặc không đọc được mảnh
+code nào để đưa cho model. Nguyên nhân thứ ba là chỗ dễ sai nhất và nó **không** gọi
+model: chấm mù rồi dán nhãn "AI" lên là kiểu hỏng tệ nhất của cả tầng này.
+
+Judge **không có backend dự bị tất định**. `ASTRACODE_JUDGE=none` biết nói "có nhắc tới",
+đúng thứ tầng khớp từ khoá đã làm — chạy nó ở đây là tiêu thời gian để ra lại kết luận
+cũ dưới một cái nhãn sai. Với backend `fci`, thiếu `FPT_*` thì job `failed` ngay
+và nói ra; backend `cli` dùng `ASTRACODE_CLI_PATH` và JWT AstraWork.
 
 ## Những chỗ cố tình nghiêm
 
@@ -189,6 +484,28 @@ Một `item`:
   `ASTRACODE_SERVICE_TOKEN`, key LLM bị che ở mọi log và mọi message lỗi — bằng cả literal
   lẫn pattern (bắt được cả secret không khai trước). `test/redact.test.mjs` canh điều này.
 - **Job nằm trong bộ nhớ**, tối đa 200 job gần nhất. Không DB, không trạng thái trên đĩa.
+- **`/admin` đòi token, kể cả từ chính máy này.** Loopback từng được miễn, vì trình duyệt
+  không gắn `Authorization` vào một lần điều hướng thường — nhưng "chạy trên localhost"
+  gồm cả mọi tab đang mở một trang lạ, và trang này liệt kê mọi job, mọi repo, mọi ticket.
+  Hệ quả: khi `ASTRACODE_SERVICE_TOKEN` đã đặt, mở `/admin` bằng thanh địa chỉ nhận 401.
+  Cách xem:
+
+  ```bash
+  curl -s -H "Authorization: Bearer $ASTRACODE_SERVICE_TOKEN" http://127.0.0.1:8000/admin
+  ```
+
+  Một lần Bearer đúng thì server đặt cookie `astracode_admin` — HttpOnly, SameSite=Strict,
+  **15 phút**, **chỉ cho GET**, và giá trị là chuỗi ngẫu nhiên chứ không phải service token —
+  nên sau lần curl đó, mở `/admin` bằng thanh địa chỉ trong 15 phút là được. Hết hạn thì
+  curl lại một lần. Xem `lib/adminAuth.mjs`.
+
+  Chưa đặt token thì server ở chế độ dev và mọi route của nó đã mở sẵn, `/admin` cũng vậy.
+  `/healthz` luôn mở: nó là cổng cho liveness probe.
+- **Log của server xuống đĩa theo ngày, giữ 7 ngày.** Dòng nào không thuộc job nào — banner,
+  dòng request, 401, 404 — vào `logs/server-<ngày>.log` thay vì chỉ ra console, vì console
+  của một tiến trình chạy nền là nơi không xem lại được. Mọi `.log` trong thư mục đó cũ hơn
+  bảy ngày bị xoá, kể cả `logs/<run_id>.log` — nên sau bảy ngày
+  `GET /api/v1/jobs/<id>/log` trả 404 cho run đó. `results/` không bị đụng tới.
 
 ## Chạy test
 

@@ -121,9 +121,10 @@ export function bannerLines(config, { runsDir, devMode }) {
     `  model         : ${config.judgeBackend === 'fci' ? config.fciModel || '(chưa đặt)' : '(không dùng model qua server)'}`,
     `  WORKSPACE_DIR : ${config.workspaceDir}`,
     `  song song     : tối đa ${config.judgeConcurrency ?? 2} lượt judge cùng lúc (cả server)`,
+    `  cache judge   : ${path.join(config.workspaceDir ?? '', 'judge-cache')} (không TTL; dọn bằng DELETE /api/v1/judge/cache?older_than=30d)`,
     `  MAX_TICKETS   : ${config.maxTickets ? `${config.maxTickets} ticket đầu mỗi job (phần còn lại → skipped_quota_limit)` : '0 (không giới hạn)'}`,
     `  matcher       : CANDIDATE_MATCHING_SPEC, siết "${config.tightenMode ?? '?'}" (đóng băng 2026-09-16)`,
-    `  logs          : ${path.join(runsDir, 'logs')}`,
+    `  logs          : ${path.join(runsDir, 'logs')} (server-<ngày>.log; xoá log quá 7 ngày)`,
     `  results       : ${path.join(runsDir, 'results')}`,
     `  SERVICE_TOKEN : ${yn(config.serviceToken)}`,
   ];
@@ -147,6 +148,13 @@ export function bannerLines(config, { runsDir, devMode }) {
     lines.push('  ghi chú       : quét tất định, không gọi model — trần kết luận là "partial"');
   }
 
+  // Endpoint FPT chịu được tám lượt song song; để 2 thì một bảng 190 ticket
+  // chạy lâu gấp bốn mà không đổi được gì ở phía nhà cung cấp.
+  if (config.judgeBackend === 'fci' && (config.judgeConcurrency ?? 2) < 8) {
+    lines.push(
+      `GỢI Ý: ASTRACODE_JUDGE_CONCURRENCY=${config.judgeConcurrency ?? 2} — với endpoint FPT nên đặt 8 (gặp 429 thì server tự lùi theo Retry-After).`,
+    );
+  }
   if (config.judgeBackend === 'fci' && !(config.fciBaseUrl && config.fciApiKey && config.fciModel)) {
     lines.push('CẢNH BÁO: backend "fci" thiếu FPT_BASE_URL / FPT_API_KEY / FPT_MODEL — mọi job sẽ failed.');
   }

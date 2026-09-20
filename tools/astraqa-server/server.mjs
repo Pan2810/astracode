@@ -17,15 +17,18 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs/promises';
-import { randomUUID, timingSafeEqual } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { makeRedactor, redactMessage } from './lib/redact.mjs';
 import { loadDotEnv } from './lib/env.mjs';
-import { runAnalyzeJob } from './lib/analyze.mjs';
-import { runJudgeJob } from './lib/judgeJob.mjs';
+import { runAnalyzeJob, parseSubset } from './lib/analyze.mjs';
+import { runJudgeJob, parseSelection } from './lib/judge.mjs';
+import { CACHE_DIRNAME, cacheStats, parseDuration, safeTenant, sweepCache } from './lib/judgeCache.mjs';
 import { createRunLog, bannerLines } from './lib/observe.mjs';
 import { createLimiter } from './lib/limit.mjs';
 import { createAdminRoutes } from './lib/admin.mjs';
+import { createDailyLog } from './lib/daily.mjs';
+import { bearerOf, createAdminAuth, sameSecret } from './lib/adminAuth.mjs';
 import { TIGHTEN_MODE } from './lib/candidates.mjs';
 import { parseTicketsInput } from './lib/tickets.mjs';
 
@@ -123,40 +126,10 @@ function sendJson(res, code, obj) {
   res.end(payload);
 }
 
-/** So sánh token theo thời gian hằng — độ dài lệch thì thôi khỏi so. */
-function tokenOk(given, expected) {
-  const a = Buffer.from(given ?? '', 'utf8');
-  const b = Buffer.from(expected ?? '', 'utf8');
-  if (a.length !== b.length || a.length === 0) return false;
-  return timingSafeEqual(a, b);
-}
-
 /** IP của bên gọi. `::ffff:127.0.0.1` rút về `127.0.0.1` cho dễ đọc. */
 function clientIp(req) {
   const raw = req.socket?.remoteAddress ?? '?';
   return String(raw).replace(/^::ffff:/, '');
-}
-
-/**
- * Bên gọi có đang ở chính máy này không.
- *
- * Trang `/admin` mở bằng trình duyệt, mà trình duyệt KHÔNG gắn `Authorization`
- * vào một lần điều hướng thường — bắt token ở đây là biến trang demo thành thứ
- * không mở được. Server lại chỉ `listen` trên `127.0.0.1` (xem cuối file), nên
- * "đến được cổng này" đã đồng nghĩa với "đang ngồi trước máy này".
- *
- * Vẫn kiểm loopback thay vì bỏ hẳn xác thực: nếu sau này ai đó đổi chỗ `listen`
- * sang `0.0.0.0`, các route admin lập tức đòi token trở lại thay vì mở toang.
- */
-function isLoopback(req) {
-  const raw = String(req.socket?.remoteAddress ?? '').replace(/^::ffff:/, '');
-  return raw === '127.0.0.1' || raw === '::1';
-}
-
-function bearerOf(req) {
-  const h = req.headers.authorization ?? '';
-  const m = /^Bearer\s+(.+)$/i.exec(String(h).trim());
-  return m ? m[1].trim() : '';
 }
 
 function readBody(req) {
@@ -194,25 +167,77 @@ export function createServer(config, { log = console.log, persist = true } = {})
   // lại, chỉ là "phiên này đã bắn bao nhiêu viên".
   const usage = { model_calls: 0, jobs: 0 };
 
+  const adminAuth = createAdminAuth({ serviceToken: config.serviceToken, devMode });
+
   // Trang theo dõi chỉ đọc. Toàn bộ logic nằm ở lib/admin.mjs; ở đây chỉ nối dây.
   const handleAdmin = createAdminRoutes({
     jobs,
     config,
+    // Một lần bị từ chối ở đây là dòng đáng xem nhất trong cả file log: trang
+    // này liệt kê mọi job, mọi repo, mọi ticket. Trước đây nó không để lại gì
+    // — route admin tự kiểm quyền và tự trả 401, không đi qua cổng bên dưới.
+    denied: (req, route) => slog(`401 ${req.method} ${route} ← ${clientIp(req)}`),
     usage,
     runsDir,
     redact: baseRedact,
-    isAuthorized: (req) => isLoopback(req) || devMode || tokenOk(bearerOf(req), config.serviceToken),
+    // Một lần Bearer đúng mở ra mười lăm phút bằng cookie HttpOnly, chỉ cho
+    // GET. Toàn bộ luật ở lib/adminAuth.mjs, gồm cả lý do loopback không còn
+    // được miễn token.
+    isAuthorized: adminAuth.authorize,
   });
-  const slog = (msg) => log(baseRedact(String(msg ?? '')));
+  // Dòng nào không thuộc job nào — banner, dòng request, 401, 404 — vừa ra
+  // console vừa xuống `logs/server-<ngày>.log`, và bảy ngày là hạn. Xem
+  // lib/daily.mjs; `persist: false` (test) thì không đụng đĩa.
+  const serverLog = createDailyLog({
+    dir: path.join(runsDir, 'logs'),
+    redact: baseRedact,
+    log,
+    enabled: persist,
+  });
+  const slog = (msg) => serverLog.line(msg);
 
-  function start(job, body, runLog) {
-    const redact = makeRedactor([
+  function redactorFor(body) {
+    return makeRedactor([
       config.serviceToken,
       config.astraworkJwt,
       config.fciApiKey,
       body.astrawork_token,
       body.repo_token,
     ]);
+  }
+
+  /**
+   * Chạy một job judge.
+   *
+   * Không dùng chung `start` với analyze: kết quả của judge đọc được TỪNG PHẦN
+   * trong lúc chạy (`job.results` lớn dần), nên trạng thái cuối chỉ đóng sổ chứ
+   * không phải là lúc dữ liệu xuất hiện. Nhập hai đường này vào một hàm sẽ làm
+   * mờ đúng điểm khác nhau ấy.
+   */
+  function startJudge(job, body, runLog) {
+    const redact = redactorFor(body);
+    job.status = 'running';
+    usage.jobs += 1;
+    runJudgeJob({ job, body, config, redact, log: (m) => runLog.line(m), limiter, usage })
+      .then((result) => {
+        // Một job đã bị gọi dừng thì kết thúc là `cancelled`, không phải
+        // `succeeded`: nó làm đúng thứ được bảo, nhưng nói "xong" sẽ khiến bên
+        // gọi tưởng cả danh sách đã được xét.
+        job.status = job.abort?.signal?.aborted ? 'cancelled' : 'succeeded';
+        job.result = result;
+        runLog.saveResult(result);
+        runLog.line(`đã ghi: ${runLog.jsonFile} | ${runLog.mdFile}`);
+      })
+      .catch((err) => {
+        job.status = 'failed';
+        job.error = redactMessage(err, redact);
+        runLog.line(`job judge xong: FAILED — ${job.error}`);
+        runLog.saveFailure(job.error);
+      });
+  }
+
+  function start(job, body, runLog) {
+    const redact = redactorFor(body);
 
     job.status = 'running';
     usage.jobs += 1;
@@ -242,14 +267,6 @@ export function createServer(config, { log = console.log, persist = true } = {})
       });
   }
 
-  function startJudge(job, body) {
-    const redact = makeRedactor([config.serviceToken, config.astraworkJwt, config.fciApiKey, body.repo_token]);
-    job.status = 'running';
-    usage.jobs += 1;
-    runJudgeJob({ job, body, config, redact, limiter, usage })
-      .catch((err) => { job.status = 'failed'; job.error = redactMessage(err, redact); });
-  }
-
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://localhost');
     const route = url.pathname.replace(/\/+$/, '') || '/';
@@ -268,10 +285,16 @@ export function createServer(config, { log = console.log, persist = true } = {})
         // Chế độ siết của matcher (§5). Ðã đóng băng; khai ra để nhìn một cái là
         // biết bản đang chạy dùng luật nào, không phải đi đọc source.
         tighten_mode: TIGHTEN_MODE,
+        // Đường nào server này có. Bên gọi dò bằng đây thay vì POST thử rồi
+        // đọc 404 — một 404 còn có thể là sai đường dẫn hay sai proxy.
+        routes: ['/api/v1/analyze', '/api/v1/judge', '/api/v1/judge/cache'],
         // Ðếm nội bộ từ lúc khởi động — KHÔNG hỏi nhà cung cấp, nên đây không
         // phải hạn mức còn lại. Lượt thử lại cũng tính, vì nó cũng là request thật.
         model_calls_this_session: usage.model_calls,
         jobs_this_session: usage.jobs,
+        // Cache judge đang chiếm bao nhiêu. `entries: null` nghĩa là có tệp quá
+        // lớn nên không đếm dòng — probe không được phép đọc 50MB mỗi lần gọi.
+        judge_cache: await cacheStats(path.join(config.workspaceDir, CACHE_DIRNAME)),
         ...(config.judgeBackend === 'fci'
           ? { fci_configured: Boolean(config.fciBaseUrl && config.fciApiKey && config.fciModel) }
           : config.judgeBackend === 'cli'
@@ -285,9 +308,9 @@ export function createServer(config, { log = console.log, persist = true } = {})
     // rơi tiếp xuống y như cũ.
     if (await handleAdmin(req, res, route)) return;
 
-    if (!devMode && !tokenOk(bearerOf(req), config.serviceToken)) {
+    if (!devMode && !sameSecret(bearerOf(req), config.serviceToken)) {
       // Ghi lại để biết có ai gõ cửa sai token — tuyệt đối không ghi token đã gửi.
-      slog(`${new Date().toISOString()} 401 ${req.method} ${route} ← ${clientIp(req)}`);
+      slog(`401 ${req.method} ${route} ← ${clientIp(req)}`);
       return sendJson(res, 401, { error: 'unauthorized: thiếu hoặc sai Authorization: Bearer <ASTRACODE_SERVICE_TOKEN>' });
     }
 
@@ -316,6 +339,18 @@ export function createServer(config, { log = console.log, persist = true } = {})
         } catch (err) {
           return sendJson(res, 400, { error: err instanceof Error ? err.message : String(err) });
         }
+      }
+
+      // Hai field lọc: sai KIỂU là sai ở phía người gửi, nên trả 400 ngay thay
+      // vì để job chạy tới lúc clone xong mới chết. `base_revision` trỏ vào một
+      // commit không có thật thì KHÔNG phải lỗi — xem `diffSinceBase`.
+      try {
+        parseSubset(body.tickets_subset);
+      } catch (err) {
+        return sendJson(res, 400, { error: err instanceof Error ? err.message : String(err) });
+      }
+      if (body.base_revision !== undefined && body.base_revision !== null && typeof body.base_revision !== 'string') {
+        return sendJson(res, 400, { error: '"base_revision" phải là một chuỗi (sha, tag hoặc tên nhánh).' });
       }
 
       const job = {
@@ -358,7 +393,9 @@ export function createServer(config, { log = console.log, persist = true } = {})
       runLog.line(
         `POST /api/v1/analyze ← ${clientIp(req)} | run_id ${job.run_id ?? '(không có)'} | job ${job.id} | ` +
           `repo ${body.repo_url} | ref ${body.ref || '(mặc định)'} | ticket ${ticketCount} | ` +
-          `backend ${['cli', 'fci', 'none'].includes(body.backend) ? `${body.backend} (ép theo request)` : config.judgeBackend}`,
+          `backend ${['cli', 'fci', 'none'].includes(body.backend) ? `${body.backend} (ép theo request)` : config.judgeBackend}` +
+          (Array.isArray(body.tickets_subset) ? ` | subset ${body.tickets_subset.length} key` : '') +
+          (body.base_revision ? ` | base ${body.base_revision}` : ''),
       );
 
       sendJson(res, 202, { job_id: job.id, status: 'queued' });
@@ -368,32 +405,161 @@ export function createServer(config, { log = console.log, persist = true } = {})
 
     if (route === '/api/v1/judge' && req.method === 'POST') {
       let body;
-      try { body = JSON.parse((await readBody(req)) || '{}'); } catch { return sendJson(res, 400, { error: 'body must be valid JSON' }); }
-      if (!body || typeof body !== 'object' || Array.isArray(body)) return sendJson(res, 400, { error: 'body must be an object' });
-      if (typeof body.repo_url !== 'string' || !body.repo_url.trim() || !Array.isArray(body.tickets) || !body.tickets.length || !body.verdict_guide || typeof body.verdict_guide !== 'object') {
-        return sendJson(res, 400, { error: 'repo_url, tickets and verdict_guide are required' });
+      try {
+        body = JSON.parse((await readBody(req)) || '{}');
+      } catch (err) {
+        return sendJson(res, 400, { error: `body không phải JSON hợp lệ: ${err instanceof Error ? err.message : ''}`.trim() });
       }
-      const job = { id: randomUUID(), run_id: body.run_id ?? null, status: 'queued', done: 0, total: body.tickets.length, results: [], error: undefined, source_revision: '', current: undefined, abort: new AbortController(), createdAt: Date.now() };
+      if (!body || typeof body !== 'object' || Array.isArray(body)) {
+        return sendJson(res, 400, { error: 'body phải là một JSON object.' });
+      }
+
+      const missing = [];
+      if (typeof body.repo_url !== 'string' || !body.repo_url.trim()) missing.push('repo_url');
+      if (!Array.isArray(body.tickets) || body.tickets.length === 0) missing.push('tickets');
+      if (!body.verdict_guide || typeof body.verdict_guide !== 'object') missing.push('verdict_guide');
+      if (missing.length) {
+        return sendJson(res, 400, { error: `thiếu field bắt buộc: ${missing.join(', ')}` });
+      }
+
+      /*
+       * Chọn lọc và cache được kiểm NGAY Ở ÐÂY, không để job tự chết.
+       *
+       * Một `mode` gõ sai hay một `skip_above` bằng 5 là sai ở phía người gửi,
+       * và một 400 kèm tên field sửa được trong mười giây; một job `failed` thì
+       * phải đi tìm trong log. `parseSelection` là cùng một hàm job sẽ gọi lại,
+       * nên hai nơi không thể lệch luật.
+       */
+      let selection;
+      try {
+        selection = parseSelection(body);
+      } catch (err) {
+        return sendJson(res, 400, { error: err instanceof Error ? err.message : String(err) });
+      }
+
+      const job = {
+        id: randomUUID(),
+        kind: 'judge',
+        run_id: body.run_id ?? null,
+        repo_url: typeof body.repo_url === 'string' ? body.repo_url : null,
+        backend: config.judgeBackend,
+        status: 'queued',
+        progress: { done: 0, total: body.tickets.length },
+        // Mảng bên gọi đọc dần. Có mặt ngay từ lúc queued để một lần GET sớm
+        // nhận `results: []` chứ không phải `undefined` — "chưa có kết quả nào"
+        // và "field này không tồn tại" là hai câu trả lời khác nhau.
+        results: [],
+        result: undefined,
+        error: undefined,
+        abort: new AbortController(),
+        createdAt: Date.now(),
+      };
       jobs.set(job.id, job);
       while (jobs.size > MAX_JOBS_KEPT) jobs.delete(jobs.keys().next().value);
-      sendJson(res, 202, { job_id: job.id, total: job.total, status: 'queued' });
-      startJudge(job, body);
+
+      const runLog = createRunLog({
+        runsDir,
+        runId: body.run_id ? `${body.run_id}-judge` : null,
+        jobId: job.id,
+        redact: redactorFor(body),
+        log,
+        enabled: persist,
+      });
+      job.runLog = runLog;
+
+      runLog.line(
+        `POST /api/v1/judge ← ${clientIp(req)} | run_id ${job.run_id ?? '(không có)'} | job ${job.id} | ` +
+          `repo ${body.repo_url} | ref ${body.ref || '(mặc định)'} | ticket ${body.tickets.length} | ` +
+          `model ${config.fciModel || '(chưa cấu hình)'} | mode ${selection.mode}` +
+          (selection.skipAbove === null ? '' : ` skip_above ${selection.skipAbove}`) +
+          ` | cache ${selection.cache ? `bật (tenant ${safeTenant(selection.tenant)})` : 'tắt'}` +
+          (selection.rulesVersion ? ` | rules ${selection.rulesVersion}` : ''),
+      );
+
+      sendJson(res, 202, { job_id: job.id, status: 'queued', total: body.tickets.length });
+      startJudge(job, body, runLog);
       return;
     }
 
-    const judgeMatch = /^\/api\/v1\/judge\/([^/]+)$/.exec(route);
-    if (judgeMatch) {
-      const job = jobs.get(decodeURIComponent(judgeMatch[1]));
-      if (!job) return sendJson(res, 404, { error: 'job_id not found' });
-      if (req.method === 'DELETE') { job.abort.abort(); job.status = 'cancelled'; return sendJson(res, 200, { status: 'cancelled', done: job.done, total: job.total, results: job.results }); }
-      if (req.method !== 'GET') return sendJson(res, 405, { error: 'method not allowed' });
-      return sendJson(res, 200, { status: job.status, done: job.done, total: job.total, results: job.results, ...(job.error ? { error: job.error } : {}), ...(job.source_revision ? { source_revision: job.source_revision } : {}) });
+    /*
+     * Dọn cache. Ðứng TRƯỚC `/api/v1/judge/:job_id` vì `cache` cũng khớp mẫu
+     * job id — đặt sau thì lệnh dọn sẽ thành "không tìm thấy job tên cache".
+     *
+     * Không có TTL (khoá đã gồm revision), nên đây là cái chổi duy nhất: gọi
+     * khi đĩa đầy, với đúng mốc thời gian mình muốn bỏ.
+     */
+    if (route === '/api/v1/judge/cache' && req.method === 'DELETE') {
+      const raw = url.searchParams.get('older_than');
+      const ms = parseDuration(raw);
+      if (ms === null) {
+        return sendJson(res, 400, {
+          error: 'cần ?older_than=<số><s|m|h|d>, ví dụ older_than=30d — dọn mù cả cache là mất tiền, nên phải nói rõ mốc.',
+        });
+      }
+      const dir = path.join(config.workspaceDir, CACHE_DIRNAME);
+      let swept;
+      try {
+        swept = await sweepCache(dir, ms);
+      } catch (err) {
+        return sendJson(res, 500, { error: `không dọn được cache: ${baseRedact(err instanceof Error ? err.message : String(err))}` });
+      }
+      slog(`DELETE /api/v1/judge/cache?older_than=${raw} ← ${clientIp(req)} | xoá ${swept.removed}, giữ ${swept.kept}, ${swept.files} tệp`);
+      return sendJson(res, 200, { older_than: raw, ...swept });
+    }
+
+    const j = /^\/api\/v1\/judge\/([^/]+)$/.exec(route);
+    if (j && req.method === 'DELETE') {
+      const job = jobs.get(decodeURIComponent(j[1]));
+      if (!job || job.kind !== 'judge') return sendJson(res, 404, { error: 'job_id không tồn tại' });
+      /*
+       * Gọi dừng, không phải xoá.
+       *
+       * Một lượt judge là một lượt gọi model, và bên gọi bấm dừng vì không muốn
+       * tiêu tiếp — nên việc đầu tiên là `abort`, để lượt đang bay bị cắt và
+       * những lượt còn xếp hàng không bao giờ được gửi. Kết quả đã có ở lại
+       * nguyên vẹn: chúng đã được trả tiền rồi.
+       */
+      job.abort?.abort();
+      if (job.status === 'queued' || job.status === 'running') job.status = 'cancelled';
+      job.runLog?.line(`DELETE /api/v1/judge/${job.id} ← ${clientIp(req)} | dừng ở ${job.results.length}/${job.progress?.total ?? '?'}`);
+      return sendJson(res, 200, {
+        status: job.status,
+        done: job.progress?.done ?? job.results.length,
+        total: job.progress?.total ?? job.results.length,
+        progress: job.progress,
+        results: job.results,
+      });
+    }
+
+    if (j && req.method === 'GET') {
+      const job = jobs.get(decodeURIComponent(j[1]));
+      if (!job || job.kind !== 'judge') return sendJson(res, 404, { error: 'job_id không tồn tại' });
+      /*
+       * `results` trả về ở MỌI trạng thái, kể cả `failed`.
+       *
+       * Một job chết ở ticket thứ 150 vẫn đã chấm xong 149 ticket, và những
+       * kết luận ấy đúng như nhau dù cái thứ 150 có hỏng. Giấu chúng đi vì
+       * trạng thái cuối là xấu sẽ bắt bên gọi chạy lại cả 150 lượt model.
+       */
+      return sendJson(res, 200, {
+        status: job.status,
+        // `done`/`total` ở cấp cao nhất nói về LƯỢT GỌI MODEL — đúng thứ đáng
+        // chờ. Số dòng đã có nằm ở `results.length`, và tám ô đếm đầy đủ nằm ở
+        // `progress` bên dưới.
+        done: job.progress?.done ?? job.results.length,
+        total: job.progress?.total ?? job.results.length,
+        progress: job.progress,
+        results: job.results,
+        ...(job.revision ? { source_revision: job.revision } : {}),
+        ...(job.stats ? { stats: job.stats } : {}),
+        ...(job.error ? { error: job.error } : {}),
+      });
     }
 
     const m = /^\/api\/v1\/analyze\/([^/]+)$/.exec(route);
     if (m && req.method === 'GET') {
       const job = jobs.get(decodeURIComponent(m[1]));
-      if (!job) return sendJson(res, 404, { error: 'job_id không tồn tại' });
+      if (!job || job.kind === 'judge') return sendJson(res, 404, { error: 'job_id không tồn tại' });
       if (job.status === 'succeeded') return sendJson(res, 200, { status: 'succeeded', result: job.result });
       if (job.status === 'failed') return sendJson(res, 200, { status: 'failed', error: job.error });
       return sendJson(res, 200, {

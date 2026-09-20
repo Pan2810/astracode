@@ -13,7 +13,8 @@
 import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { cloneRepo } from './git.mjs';
+import { cloneRepo, diffSinceBase } from './git.mjs';
+import { readRepoRules } from './repoRules.mjs';
 import { parseTicketsInput } from './tickets.mjs';
 import { buildPrompt, buildJudgePrompt } from './prompt.mjs';
 import { extractJsonBlock, pickItem } from './jsonBlock.mjs';
@@ -24,6 +25,39 @@ import { buildRepoContext, renderContext } from './repoContext.mjs';
 import { createLimiter } from './limit.mjs';
 import { buildIndex } from './candidates.mjs';
 import { normalizeAssessment, notAssessed } from './assessment.mjs';
+
+/**
+ * `tickets_subset` — chỉ quét đúng những ticket này.
+ *
+ * Repo vẫn được clone đủ: thứ đắt trong một job không phải bản clone mà là
+ * những lượt quét và những lượt gọi model. Bên gọi đã biết 184 ticket kia không
+ * đổi gì kể từ lần chạy trước thì không có lý do gì bắt server chấm lại chúng.
+ *
+ * Ticket nằm ngoài tập KHÔNG biến mất khỏi báo cáo — chúng về với
+ * `reason: "not_in_subset"`, cùng một luật với `skipped_quota_limit`: bỏ hẳn
+ * một ticket khỏi `items` sẽ khiến AstraQA đọc bảng thành "`tickets_md` chỉ có
+ * bấy nhiêu", và một ticket vắng mặt trông y như một ticket đã xét và không
+ * thấy gì.
+ *
+ * Key lạ (có trong tập, không có trong `tickets_md`) chỉ là một cảnh báo: nó
+ * thường là ticket vừa bị xoá bên kế hoạch, không phải lý do để hỏng cả job.
+ *
+ * @returns {{keys: Set<string>|null, unknown: string[]}}
+ */
+export function parseSubset(raw, tickets = []) {
+  if (raw === undefined || raw === null) return { keys: null, unknown: [] };
+  if (!Array.isArray(raw)) throw new Error('"tickets_subset" phải là một mảng key.');
+  const keys = new Set();
+  for (const k of raw) {
+    const s = String(k ?? '').trim();
+    if (s) keys.add(s);
+  }
+  if (keys.size === 0) {
+    throw new Error('"tickets_subset" rỗng — gửi mảng rỗng nghĩa là không quét gì; bỏ hẳn field nếu muốn quét tất cả.');
+  }
+  const have = new Set(tickets.map((t) => t.key));
+  return { keys, unknown: [...keys].filter((k) => !have.has(k)) };
+}
 
 export const DEFAULT_OPTIONS = {
   max_files_per_ticket: 5,
@@ -319,7 +353,7 @@ async function mappingState(ticket, evidence, repoDir) {
   return 'weak_link';
 }
 
-function buildReportMd({ runId, generatedAt, backend, repoUrl, ref, head, items, tickets, droppedByKey, clampedByKey, failedByKey, stats }) {
+function buildReportMd({ runId, generatedAt, backend, repoUrl, ref, head, items, tickets, droppedByKey, clampedByKey, failedByKey, stats, diff, warnings = [] }) {
   const byKey = new Map(tickets.map((t) => [t.key, t]));
   const count = (s) => items.filter((i) => i.code_status === s).length;
 
@@ -331,6 +365,15 @@ function buildReportMd({ runId, generatedAt, backend, repoUrl, ref, head, items,
   out.push(`- backend: \`${backend}\`${stats.model ? ` (model \`${stats.model}\`)` : ''}`);
   out.push(`- repo: ${repoUrl}${ref ? ` (ref: ${ref})` : ''}`);
   if (head) out.push(`- commit (source_revision): \`${head}\``);
+  if (diff?.base) {
+    out.push(`- base_revision: \`${diff.base}\` — ${diff.files ? `${diff.files.length} tệp đổi tới HEAD` : 'không lấy được danh sách tệp'}`);
+  }
+  if (stats.tickets_subset !== null && stats.tickets_subset !== undefined) {
+    out.push(
+      `- tickets_subset: xin ${stats.tickets_subset} key, quét ${stats.tickets_total - stats.tickets_out_of_subset}` +
+        `, để nguyên ${stats.tickets_out_of_subset} ticket (\`not_in_subset\`)`,
+    );
+  }
   out.push(`- tickets: ${items.length} — done ${count('done')}, partial ${count('partial')}, missing ${count('missing')}`);
   out.push(`- bằng chứng: giữ ${stats.evidence_kept}, loại ${stats.evidence_dropped}, kẹp ${stats.evidence_clamped}`);
   out.push(`- lượt judge: ${stats.judge_parsed}/${stats.judge_calls} parse được${stats.judge_failed ? `, **${stats.judge_failed} lượt hỏng**` : ''}`);
@@ -350,6 +393,12 @@ function buildReportMd({ runId, generatedAt, backend, repoUrl, ref, head, items,
         '`code_status: missing` và `reason: judge_failed: …` — đó là "chưa biết", KHÔNG phải "đã kiểm tra và thấy thiếu".',
     );
   }
+  if (warnings.length) {
+    out.push('');
+    out.push('> **Cảnh báo:**');
+    for (const w of warnings) out.push(`> - ${w}`);
+  }
+
   out.push('');
   out.push('| Ticket | Trạng thái ngoài | Code | Confidence | Bằng chứng |');
   out.push('|---|---|---|---:|---:|');
@@ -365,6 +414,16 @@ function buildReportMd({ runId, generatedAt, backend, repoUrl, ref, head, items,
     const t = byKey.get(it.key);
     out.push(`## ${it.key}${t?.title ? ` — ${t.title}` : ''}`);
     out.push('');
+    if (it.reason === 'not_in_subset') {
+      // Khác `skipped_quota_limit` ở chỗ: đây là bên gọi tự chọn không quét,
+      // không phải server cắt vì hạn mức. Cùng một chữ `missing`, hai câu chuyện.
+      out.push('- **KHÔNG QUÉT** — ticket này không nằm trong `tickets_subset` của request.');
+      if (t?.status) out.push(`- trạng thái do nguồn ngoài báo: ${t.status}`);
+      out.push('');
+      out.push('- _`missing` ở đây nghĩa là "không được xét lần này", không phải "đã kiểm tra và thấy thiếu"._');
+      out.push('');
+      continue;
+    }
     if (it.reason === 'skipped_quota_limit') {
       out.push(`- **BỎ QUA** — vượt \`ASTRACODE_MAX_TICKETS=${stats.max_tickets}\`, ticket này chưa được xét lần nào.`);
       if (t?.status) out.push(`- trạng thái do nguồn ngoài báo: ${t.status}`);
@@ -451,10 +510,39 @@ export async function runAnalyzeJob({ job, body, config, redact, log, limiter = 
    * không phải đã xét rồi thấy thiếu.
    */
   const maxTickets = Math.max(0, Number(config.maxTickets ?? 0) || 0);
-  const toJudge = maxTickets > 0 ? tickets.slice(0, maxTickets) : tickets;
-  const skipped = maxTickets > 0 ? tickets.slice(maxTickets) : [];
+
+  /*
+   * Hai phép lọc, và thứ tự giữa chúng là có chủ ý: tập con của BÊN GỌI áp
+   * trước, trần của server áp sau. Ðảo lại thì trần cắt vào danh sách đầy đủ
+   * rồi tập con mới lọc phần còn sót — bên gọi xin 6 ticket cuối bảng sẽ nhận
+   * về không ticket nào, mà không có gì nói vì sao.
+   */
+  const subset = parseSubset(body.tickets_subset, tickets);
+  const wanted = subset.keys ? tickets.filter((t) => subset.keys.has(t.key)) : tickets;
+  const outOfSubset = subset.keys ? tickets.filter((t) => !subset.keys.has(t.key)) : [];
+
+  const toJudge = maxTickets > 0 ? wanted.slice(0, maxTickets) : wanted;
+  const skipped = maxTickets > 0 ? wanted.slice(maxTickets) : [];
+
+  /** Chuyện đáng nói nhưng không đáng hỏng job. Ði thẳng vào kết quả trả về. */
+  const warnings = [];
+  if (subset.keys) {
+    log(
+      `tickets_subset: ${subset.keys.size} key được xin, khớp ${wanted.length}/${tickets.length} ticket — ` +
+        `${outOfSubset.length} ticket còn lại về với reason "not_in_subset" (repo vẫn clone đủ).`,
+    );
+    if (subset.unknown.length) {
+      warnings.push(
+        `tickets_subset có ${subset.unknown.length} key không có trong tickets_md: ` +
+          `${subset.unknown.slice(0, 10).join(', ')}${subset.unknown.length > 10 ? '…' : ''}`,
+      );
+    }
+    if (wanted.length === 0) {
+      warnings.push('tickets_subset không khớp ticket nào trong tickets_md — không lượt quét nào chạy.');
+    }
+  }
   if (skipped.length) {
-    log(`ASTRACODE_MAX_TICKETS=${maxTickets} — chỉ chấm ${toJudge.length}/${tickets.length} ticket, bỏ qua ${skipped.length} ticket còn lại.`);
+    log(`ASTRACODE_MAX_TICKETS=${maxTickets} — chỉ chấm ${toJudge.length}/${wanted.length} ticket, bỏ qua ${skipped.length} ticket còn lại.`);
   }
 
   const repoDir = path.join(config.workspaceDir, job.id, 'repo');
@@ -472,6 +560,10 @@ export async function runAnalyzeJob({ job, body, config, redact, log, limiter = 
     tickets_total: tickets.length,
     tickets_skipped: skipped.length,
     max_tickets: maxTickets,
+    // Bên gọi xin bao nhiêu, khớp bao nhiêu, còn lại bao nhiêu không quét.
+    // `null` = không gửi `tickets_subset`, khác với "gửi nhưng không khớp ai".
+    tickets_subset: subset.keys ? subset.keys.size : null,
+    tickets_out_of_subset: outOfSubset.length,
     hits_429: 0,
     hits_503: 0,
     // Bao nhiêu item mang được bản ghi quét thật. `items_without_scan` là số
@@ -504,6 +596,31 @@ export async function runAnalyzeJob({ job, body, config, redact, log, limiter = 
       `clone xong: ${tickets.length} ticket, commit ${head || '(không rõ)'} — ` +
         `chấm ${toJudge.length} bằng backend ${backend}${skipped.length ? `, bỏ qua ${skipped.length} vì ASTRACODE_MAX_TICKETS` : ''}`,
     );
+
+    /*
+     * Tệp rules của đội, nguyên văn, nếu repo có.
+     *
+     * Đọc ở đây vì đây là chỗ duy nhất có bản clone. AstraCode không hiểu nội
+     * dung — luật verdict nằm bên AstraQA — nên nó chỉ chuyển tệp đi. Đọc hỏng
+     * không làm hỏng job: một repo không có rules là chuyện bình thường, và
+     * bên kia đã có sẵn đường lui về bộ luật cấp tenant.
+     */
+    const repoRules = await readRepoRules({ repoDir, log });
+
+    /*
+     * `base_revision` — những tệp đã đổi từ mốc ấy tới HEAD.
+     *
+     * Chạy ngay sau clone và TRƯỚC vòng quét: nó có thể phải đào sâu thêm lịch
+     * sử, và một lần đào hỏng giữa chừng thì thà biết sớm hơn là sau 184 lượt.
+     * Không tìm được `base` chỉ là cảnh báo — xem `diffSinceBase`.
+     */
+    const diff = await diffSinceBase({ repoDir, base: body.base_revision, redact, timeoutMs, log });
+    if (diff.warning) {
+      warnings.push(diff.warning);
+      log(`CẢNH BÁO: ${diff.warning}`);
+    } else if (diff.files) {
+      log(`base_revision ${diff.base}: ${diff.files.length} tệp đổi tới HEAD`);
+    }
 
     /**
      * Index toàn repo, dựng ÐÚNG MỘT LẦN cho cả job.
@@ -618,13 +735,14 @@ export async function runAnalyzeJob({ job, body, config, redact, log, limiter = 
 
     // Ticket vượt trần vẫn có mặt trong báo cáo, chỉ nói rõ là chưa xét. Bỏ hẳn
     // chúng khỏi `items` sẽ khiến AstraQA tưởng input chỉ có bấy nhiêu.
-    for (const ticket of skipped) {
+    // Ticket ngoài `tickets_subset` cũng vậy, chỉ khác lý do.
+    for (const ticket of [...skipped, ...outOfSubset]) {
       items.push({
         key: ticket.key,
         code_status: 'missing',
         confidence: 0,
         evidence: [],
-        reason: 'skipped_quota_limit',
+        reason: skipped.includes(ticket) ? 'skipped_quota_limit' : 'not_in_subset',
         // Chưa xét lần nào thì cũng chưa quét lần nào.
         scan: null,
         assessment: notAssessed(ticket),
@@ -666,6 +784,32 @@ export async function runAnalyzeJob({ job, body, config, redact, log, limiter = 
       // SHA đầy đủ của commit đã clone. Cùng giá trị lặp lại trong `item.scan.revision`
       // để mỗi item tự chứa, dựng được link dẫn chứng mà không phải ngoái lên.
       source_revision: head || null,
+      /*
+       * `.astraqa/rules.yml` như nó nằm trong repo, hoặc `null` khi repo không
+       * có. `null` khác với một tệp rỗng và bên gọi phân biệt hai cái: tệp rỗng
+       * là đội đã nói "dùng mặc định", không có tệp là đội chưa nói gì.
+       */
+      repo_rules: repoRules,
+      /*
+       * Mốc so sánh đã GIẢI RA, và những tệp đổi từ đó tới HEAD.
+       *
+       * Ba trạng thái, phân biệt được bằng đúng hai field này:
+       *   - không hỏi          → `base_revision: null`, `changed_files: null`, không cảnh báo
+       *   - hỏi và lấy được    → `base_revision: <sha>`, `changed_files: [...]`
+       *   - hỏi mà không thấy  → `base_revision: null`, `changed_files: null`, KÈM cảnh báo
+       *
+       * `changed_files` là `null` chứ không phải `[]` khi không biết: một mảng
+       * rỗng là câu trả lời "không tệp nào đổi", và hai chuyện ấy khác nhau.
+       */
+      base_revision: diff.base,
+      changed_files: diff.files,
+      /*
+       * Chuyện đáng nói mà không đáng hỏng job: base không tìm thấy, key trong
+       * `tickets_subset` không có trong `tickets_md`. Luôn có mặt (mảng rỗng khi
+       * không có gì) để bên gọi không phải phân biệt "không có cảnh báo" với
+       * "bản server này chưa biết field ấy".
+       */
+      warnings,
       items,
       report_md: buildReportMd({
         runId: body.run_id ?? job.id,
@@ -680,6 +824,8 @@ export async function runAnalyzeJob({ job, body, config, redact, log, limiter = 
         clampedByKey,
         failedByKey,
         stats,
+        diff,
+        warnings,
       }),
       stats,
     };

@@ -23,8 +23,6 @@ const run = promisify(execFile);
 const TOKEN = 'service-token-maxtickets-0123456789';
 
 let tmp;
-let server;
-let base;
 
 async function makeRepo(name, files) {
   const dir = path.join(tmp, name);
@@ -87,7 +85,6 @@ const FIVE = ['## T-1 — mot', '## T-2 — hai', '## T-3 — ba', '## T-4 — b
 
 before(async () => {
   tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'astraqa-maxtickets-'));
-  server = null;
 });
 
 after(async () => {
@@ -239,11 +236,11 @@ test('banner khai MAX_TICKETS ở cả hai trạng thái', () => {
     { port: 1, judgeBackend: 'fci', fciModel: 'm', fciBaseUrl: 'u', fciApiKey: 'k', workspaceDir: 'w', cliPath: 'c', astraworkJwt: '', serviceToken: 's', judgeConcurrency: 2, maxTickets: 3 },
     { runsDir: 'r', devMode: false },
   ).join('\n');
-  assert.match(co, /MAX_TICKETS   : 3 ticket đầu mỗi job/);
+  assert.match(co, /MAX_TICKETS {3}: 3 ticket đầu mỗi job/);
 
   const khong = bannerLines(
     { port: 1, judgeBackend: 'none', fciModel: '', fciBaseUrl: '', fciApiKey: '', workspaceDir: 'w', cliPath: 'c', astraworkJwt: '', serviceToken: 's', judgeConcurrency: 2, maxTickets: 0 },
     { runsDir: 'r', devMode: false },
   ).join('\n');
-  assert.match(khong, /MAX_TICKETS   : 0 \(không giới hạn\)/);
+  assert.match(khong, /MAX_TICKETS {3}: 0 \(không giới hạn\)/);
 });

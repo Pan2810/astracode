@@ -7,7 +7,7 @@
  *   3. cách ly lỗi theo ticket — ticket hỏng thành một item `missing` có
  *      `reason: judge_failed: …`, job vẫn trả về những ticket đã chấm xong.
  *
- * Không ca nào gọi mạng: `sleep` được đóng thế nên bốn lần chờ 2/4/8/16s trôi
+ * Không ca nào gọi mạng: `sleep` được đóng thế nên bốn lần chờ 1/2/4/8s trôi
  * qua tức thì, và HTTP được đóng thế bằng một server cục bộ.
  */
 import { test, before, after } from 'node:test';
@@ -19,7 +19,14 @@ import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { pathToFileURL } from 'node:url';
-import { withRetry, RetryableHttpError, BACKOFF_MS, RETRY_STATUSES } from '../lib/retry.mjs';
+import {
+  withRetry,
+  RetryableHttpError,
+  BACKOFF_MS,
+  RETRY_STATUSES,
+  RETRY_AFTER_CAP_MS,
+  parseRetryAfter,
+} from '../lib/retry.mjs';
 import { createLimiter } from '../lib/limit.mjs';
 import { createServer } from '../server.mjs';
 
@@ -30,10 +37,10 @@ const TOKEN = 'service-token-retry-test-0123456789';
 
 test('chỉ 429 và 503 nằm trong danh sách thử lại', () => {
   assert.deepEqual([...RETRY_STATUSES].sort(), [429, 503]);
-  assert.deepEqual(BACKOFF_MS, [2000, 4000, 8000, 16000]);
+  assert.deepEqual(BACKOFF_MS, [1000, 2000, 4000, 8000]);
 });
 
-test('429 được thử lại 4 lần, chờ đúng 2s/4s/8s/16s', async () => {
+test('429 được thử lại 4 lần, chờ đúng 1s/2s/4s/8s', async () => {
   const waits = [];
   let calls = 0;
   await assert.rejects(
@@ -45,9 +52,9 @@ test('429 được thử lại 4 lần, chờ đúng 2s/4s/8s/16s', async () => 
         },
         { sleep: async (ms) => void waits.push(ms), onRetry: () => {} },
       ),
-    /đã thử lại 4 lần \(2s\/4s\/8s\/16s\) mà vẫn 429/,
+    /đã thử lại 4 lần \(1s\/2s\/4s\/8s\) mà vẫn 429/,
   );
-  assert.deepEqual(waits, [2000, 4000, 8000, 16000]);
+  assert.deepEqual(waits, [1000, 2000, 4000, 8000]);
   assert.equal(calls, 5, 'một lượt đầu + bốn lần thử lại');
 });
 
@@ -64,7 +71,7 @@ test('503 rồi 200: trả kết quả, không ném', async () => {
   );
   assert.equal(out, 'xong');
   assert.equal(calls, 3);
-  assert.deepEqual(waits, [2000, 4000], 'chỉ chờ đúng số lần đã hỏng');
+  assert.deepEqual(waits, [1000, 2000], 'chỉ chờ đúng số lần đã hỏng');
 });
 
 test('4xx khác KHÔNG được thử lại — ném ngay lượt đầu', async () => {
@@ -99,8 +106,55 @@ test('onRetry báo đủ mã, lần thứ mấy, chờ bao lâu', async () => {
   );
   assert.equal(seen.length, 4);
   assert.deepEqual(seen.map((s) => s.attempt), [1, 2, 3, 4]);
-  assert.deepEqual(seen.map((s) => s.waitMs), [2000, 4000, 8000, 16000]);
+  assert.deepEqual(seen.map((s) => s.waitMs), [1000, 2000, 4000, 8000]);
   assert.ok(seen.every((s) => s.status === 503 && s.of === 4));
+  // Không có `Retry-After` thì chờ theo bảng, và nói rõ là theo bảng.
+  assert.ok(seen.every((s) => s.source === 'backoff'));
+});
+
+test('Retry-After thắng bảng chờ, và header hỏng thì rơi về bảng', async () => {
+  const now = Date.parse('2026-09-20T10:00:00Z');
+  // Hai dạng RFC cho phép: số giây, và một mốc thời gian.
+  assert.equal(parseRetryAfter('30'), 30_000);
+  assert.equal(parseRetryAfter('Sun, 20 Sep 2026 10:00:05 GMT', now), 5000);
+  // Mốc đã qua, số 0, chữ rác, header vắng — tất cả là "không đọc được".
+  assert.equal(parseRetryAfter('Sun, 20 Sep 2026 09:59:00 GMT', now), null);
+  assert.equal(parseRetryAfter('0'), null);
+  assert.equal(parseRetryAfter('lát nữa nhé'), null);
+  assert.equal(parseRetryAfter(null), null);
+
+  const waits = [];
+  const seen = [];
+  let calls = 0;
+  const out = await withRetry(
+    async () => {
+      calls += 1;
+      if (calls === 1) throw new RetryableHttpError(429, 'FCI trả 429: quota', 3000);
+      if (calls === 2) throw new RetryableHttpError(429, 'FCI trả 429: quota');
+      return 'xong';
+    },
+    { sleep: async (ms) => void waits.push(ms), onRetry: (info) => seen.push(info) },
+  );
+  assert.equal(out, 'xong');
+  // Lần đầu chờ đúng 3s nhà cung cấp đòi; lần sau không có header nên về bảng.
+  assert.deepEqual(waits, [3000, 2000]);
+  assert.deepEqual(seen.map((s) => s.source), ['retry-after', 'backoff']);
+});
+
+test('Retry-After quá trần thì không chờ theo nó — thà hỏng sớm', async () => {
+  const waits = [];
+  let calls = 0;
+  await withRetry(
+    async () => {
+      calls += 1;
+      // Một giờ: chờ chừng ấy là treo cả job, AstraQA chạy lại còn rẻ hơn.
+      if (calls === 1) throw new RetryableHttpError(429, 'FCI trả 429', 3_600_000);
+      return 'xong';
+    },
+    { sleep: async (ms) => void waits.push(ms) },
+  );
+  assert.ok(RETRY_AFTER_CAP_MS < 3_600_000);
+  assert.deepEqual(waits, [1000], 'quá trần thì rơi về bảng chờ');
 });
 
 // ───────────────────────── limiter ─────────────────────────

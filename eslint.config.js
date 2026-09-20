@@ -17,6 +17,8 @@ export default tseslint.config(
       'web/**',
       '.venv/**',
       '.verify-baseline/**',
+      // Repositories cloned by astraqa-server are external runtime data.
+      '.workspace/**',
     ],
   },
   js.configs.recommended,
@@ -119,6 +121,26 @@ export default tseslint.config(
     rules: {
       'no-restricted-imports': 'off',
       '@typescript-eslint/no-explicit-any': 'off',
+    },
+  },
+
+  // astraqa-server chạy trên Node ≥ 20 và dùng runtime của nó: `fetch` có sẵn,
+  // hẹn giờ là global, `AbortController` dùng để cắt một lượt gọi model quá
+  // giờ. Không khai ở đây thì `no-undef` báo 85 lỗi trên 16 file — một cổng
+  // lint không ai qua được là cổng lint không ai đọc.
+  {
+    files: ['tools/astraqa-server/**/*.mjs'],
+    languageOptions: {
+      globals: {
+        fetch: 'readonly',
+        setTimeout: 'readonly',
+        clearTimeout: 'readonly',
+        setInterval: 'readonly',
+        clearInterval: 'readonly',
+        AbortController: 'readonly',
+        AbortSignal: 'readonly',
+        queueMicrotask: 'readonly',
+      },
     },
   },
 

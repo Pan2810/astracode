@@ -90,3 +90,87 @@ export async function cloneRepo({ repoUrl, ref, repoToken, destDir, redact, time
   }
   return { head };
 }
+
+/** Commit có mặt trong bản clone chưa? Trả sha đầy đủ, hoặc `null`. */
+async function shaOf(repoDir, rev, timeoutMs) {
+  try {
+    const { stdout } = await git(['rev-parse', '--verify', '--quiet', `${rev}^{commit}`], {
+      cwd: repoDir,
+      timeoutMs,
+    });
+    return stdout.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * `base..HEAD` đã đổi những tệp nào.
+ *
+ * ## Vì sao phải đào thêm
+ *
+ * Bản clone là `--depth 1`: nó chỉ có đúng một commit, nên `base` gần như chắc
+ * chắn chưa có mặt. Bốn cách lấy về, thử theo đúng thứ tự từ rẻ tới đắt, và
+ * kiểm lại sau mỗi lần — dừng ngay khi đủ, để một repo lớn không bị kéo cả lịch
+ * sử về chỉ vì `base` cách HEAD ba commit:
+ *
+ *   1. đã có sẵn (bên gọi đưa `ref` đủ sâu, hoặc base chính là HEAD)
+ *   2. `fetch origin <base>` — rẻ nhất, nhưng chỉ chạy khi remote cho phép xin
+ *      thẳng một sha (`uploadpack.allowReachableSHA1InWant`)
+ *   3. `fetch --deepen` 100 rồi 500 — base là tổ tiên của nhánh đang clone
+ *   4. `fetch --unshallow` — đắt nhất, và cũng là lần thử cuối
+ *
+ * ## Không tìm thấy KHÔNG phải lỗi
+ *
+ * `base_revision` là thứ bên gọi nhớ từ lần chạy trước; nó có thể đã bị
+ * force-push đè, có thể thuộc một fork, có thể là một sha gõ nhầm. Ðánh hỏng cả
+ * job vì chuyện ấy là vứt đi 184 lượt phân tích đã chạy xong để đổi lấy một
+ * danh sách tệp phụ trợ. Trả `files: null` kèm một câu cảnh báo, và để bên gọi
+ * tự quyết.
+ *
+ * @returns {Promise<{base: string|null, files: string[]|null, warning: string|null}>}
+ */
+export async function diffSinceBase({ repoDir, base, redact = (s) => s, timeoutMs = 300_000, log = () => {} }) {
+  const wanted = String(base ?? '').trim();
+  if (!wanted) return { base: null, files: null, warning: null };
+
+  let sha = await shaOf(repoDir, wanted, 30_000);
+  const attempts = [
+    { why: `fetch thẳng ${wanted}`, args: ['fetch', '--no-tags', '--quiet', 'origin', wanted] },
+    { why: 'deepen 100', args: ['fetch', '--no-tags', '--quiet', '--deepen', '100', 'origin'] },
+    { why: 'deepen 500', args: ['fetch', '--no-tags', '--quiet', '--deepen', '500', 'origin'] },
+    { why: 'unshallow', args: ['fetch', '--no-tags', '--quiet', '--unshallow', 'origin'] },
+  ];
+  for (const attempt of attempts) {
+    if (sha) break;
+    try {
+      await git(attempt.args, { cwd: repoDir, timeoutMs });
+    } catch (err) {
+      // Mỗi cách đều có lý do chính đáng để hỏng (remote không cho xin sha,
+      // repo không phải shallow…). Ghi lại rồi thử cách sau.
+      log(`base_revision: ${attempt.why} không được — ${redact(err?.stderr || err?.message || String(err)).trim().split('\n').slice(-1)[0]}`);
+      continue;
+    }
+    sha = await shaOf(repoDir, wanted, 30_000);
+    if (sha) log(`base_revision: lấy được ${wanted} bằng ${attempt.why}`);
+  }
+
+  if (!sha) {
+    return {
+      base: null,
+      files: null,
+      warning:
+        `base_revision "${wanted}" không có trong bản clone và không fetch về được ` +
+        `(đã thử: ${attempts.map((a) => a.why).join(', ')}) — changed_files là null.`,
+    };
+  }
+
+  try {
+    const { stdout } = await git(['diff', '--name-only', `${sha}..HEAD`], { cwd: repoDir, timeoutMs });
+    const files = stdout.split('\n').map((l) => l.trim()).filter(Boolean);
+    return { base: sha, files, warning: null };
+  } catch (err) {
+    const detail = redact(err?.stderr || err?.message || String(err)).trim().split('\n').slice(-1)[0];
+    return { base: sha, files: null, warning: `git diff ${wanted}..HEAD hỏng: ${detail} — changed_files là null.` };
+  }
+}
