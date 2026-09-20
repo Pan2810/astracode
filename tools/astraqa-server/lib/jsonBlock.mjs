@@ -8,6 +8,103 @@
 
 const STATUSES = new Set(['done', 'partial', 'missing']);
 
+/**
+ * Từ vựng trạng thái của MỘT tiêu chí chấp nhận.
+ *
+ * Bốn giá trị này là của AstraQA (`code_reconcile.AC_STATUSES`), chép nguyên
+ * văn chứ không đặt lại tên: bên kia đọc `status` bằng đúng bốn chữ ấy và mọi
+ * chữ khác rơi về `unknown`, nên một bảng dịch ở giữa chỉ tạo ra chỗ để lệch.
+ */
+const AC_STATUSES = new Set(['satisfied', 'partial', 'not_satisfied', 'unknown']);
+
+/**
+ * Model hay trả bằng chữ của con người. Nhận những chữ ấy rồi quy về từ vựng
+ * chuẩn — khoan dung ở đầu vào, nghiêm ngặt ở đầu ra.
+ */
+const AC_SYNONYMS = new Map([
+  ['met', 'satisfied'],
+  ['done', 'satisfied'],
+  ['pass', 'satisfied'],
+  ['passed', 'satisfied'],
+  ['ok', 'satisfied'],
+  ['unmet', 'not_satisfied'],
+  ['not met', 'not_satisfied'],
+  ['missing', 'not_satisfied'],
+  ['fail', 'not_satisfied'],
+  ['failed', 'not_satisfied'],
+  ['partially', 'partial'],
+  ['partially_satisfied', 'partial'],
+  ['unclear', 'unknown'],
+  ['unsure', 'unknown'],
+  ['', 'unknown'],
+]);
+
+function acStatus(raw) {
+  const s = String(raw ?? '').trim().toLowerCase().replace(/[\s-]+/g, '_');
+  if (AC_STATUSES.has(s)) return s;
+  const mapped = AC_SYNONYMS.get(s) ?? AC_SYNONYMS.get(s.replace(/_/g, ' '));
+  return mapped ?? 'unknown';
+}
+
+/**
+ * `assessment` — một mục cho MỘT tiêu chí, dựng từ danh sách ta đã gửi đi.
+ *
+ * Không lấy nguyên danh sách model trả về, và đây là chỗ quan trọng nhất của
+ * hàm này: `id` phải là số thứ tự của tiêu chí trong request, còn `text` phải
+ * là chữ của bên gọi. Ðể model tự đặt `id` hoặc tự viết lại `text` thì bên
+ * nhận gộp kết quả nhiều repo theo `id` ấy, và hai kết luận về hai tiêu chí
+ * khác nhau sẽ chồng lên nhau mà không ai thấy.
+ *
+ * Tiêu chí model không nhắc tới → `unknown`. Nói "không biết" là một câu trả
+ * lời hợp lệ; bịa ra một trạng thái cho nó thì không.
+ */
+function buildAssessment(raw, criteria) {
+  if (!Array.isArray(criteria) || criteria.length === 0) return null;
+
+  const said = new Map();
+  const list = Array.isArray(raw?.criteria) ? raw.criteria : Array.isArray(raw) ? raw : [];
+  for (const entry of list) {
+    if (!entry || typeof entry !== 'object') continue;
+    const id = Number(entry.id);
+    if (Number.isInteger(id) && id >= 1 && id <= criteria.length) {
+      if (!said.has(id)) said.set(id, entry);
+      continue;
+    }
+    // Không có `id` dùng được thì thử khớp bằng chính chữ của tiêu chí —
+    // model nào cũng chép lại đề bài dễ hơn là đếm đúng số thứ tự.
+    const text = String(entry.criterion ?? entry.text ?? '').trim().toLowerCase();
+    if (!text) continue;
+    const at = criteria.findIndex((c) => String(c).trim().toLowerCase() === text);
+    if (at >= 0 && !said.has(at + 1)) said.set(at + 1, entry);
+  }
+
+  return {
+    criteria: criteria.map((text, i) => {
+      const id = i + 1;
+      const entry = said.get(id);
+      const evidence = Array.isArray(entry?.evidence)
+        ? entry.evidence
+            .filter((ev) => ev && typeof ev === 'object' && String(ev.path ?? '').trim())
+            .map((ev) => ({
+              path: String(ev.path).trim(),
+              lines: String(ev.lines ?? '').trim(),
+              note: String(ev.note ?? '').trim(),
+            }))
+        : [];
+      const status = entry ? acStatus(entry.status ?? entry.state) : 'unknown';
+      return {
+        id,
+        text: String(text),
+        // Cùng luật với AstraQA: một trạng thái khác `unknown` mà không chỉ
+        // được dòng nào thì nó không phải kết luận, nó là một phỏng đoán.
+        status: status !== 'unknown' && !evidence.some((ev) => ev.lines) ? 'unknown' : status,
+        evidence,
+        reason: String(entry?.reason ?? '').trim(),
+      };
+    }),
+  };
+}
+
 /** Lấy khối ```json CUỐI CÙNG — model hay in nháp trước rồi mới chốt. */
 export function extractJsonBlock(stdout) {
   const text = String(stdout ?? '');
@@ -44,7 +141,7 @@ function fail(ticketKey, what) {
  * model đang trả lời nhầm ticket, hoặc nó tự đặt lại key — im lặng sửa lại
  * chỉ giấu cả hai.
  */
-export function pickItem(parsed, ticketKey) {
+export function pickItem(parsed, ticketKey, { acceptanceCriteria = [] } = {}) {
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
     fail(ticketKey, 'tầng ngoài cùng phải là object có field "items".');
   }
@@ -90,5 +187,9 @@ export function pickItem(parsed, ticketKey) {
     confidence,
     evidence,
     reason,
+    // Chỉ có mặt khi ticket mang tiêu chí chấp nhận. `null` ở đây là "ticket
+    // này không có tiêu chí nào", khác hẳn "có tiêu chí mà chưa chấm" — cái
+    // sau là một danh sách toàn `unknown`.
+    assessment: buildAssessment(item.assessment, acceptanceCriteria),
   };
 }

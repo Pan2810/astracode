@@ -15,7 +15,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { cloneRepo, diffSinceBase } from './git.mjs';
 import { readRepoRules } from './repoRules.mjs';
-import { resolveTickets } from './tickets.mjs';
+import { MAX_BODY_CHARS, parseSchemaVersion, resolveTickets } from './tickets.mjs';
 import { buildPrompt, buildJudgePrompt } from './prompt.mjs';
 import { extractJsonBlock, pickItem } from './jsonBlock.mjs';
 import { matchesAny } from './globs.mjs';
@@ -383,6 +383,9 @@ function buildReportMd({ runId, generatedAt, backend, repoUrl, ref, head, items,
       out.push('');
       continue;
     }
+    if (it.truncated) {
+      out.push('- **MÔ TẢ ÐÃ CẮT** — kết luận dưới đây dựa trên phần mô tả đã bị cắt bớt.');
+    }
     const failed = failedByKey.get(it.key);
     if (failed) {
       out.push(`- **KHÔNG chấm được** — ${failed}`);
@@ -410,6 +413,16 @@ function buildReportMd({ runId, generatedAt, backend, repoUrl, ref, head, items,
       }
     } else {
       out.push('- _không có bằng chứng nào trụ lại sau khi đối chiếu với repo._');
+    }
+    // Bảng chấm từng tiêu chí chấp nhận. Ðọc được bằng mắt ở đây, và là cùng
+    // dữ liệu mà AstraQA gộp theo `id` ở đầu bên kia.
+    if (it.assessment?.criteria?.length) {
+      out.push('');
+      out.push('Tiêu chí chấp nhận:');
+      for (const c of it.assessment.criteria) {
+        const cite = c.evidence.map((ev) => `\`${ev.path}${ev.lines ? `:${ev.lines}` : ''}\``).join(', ');
+        out.push(`- ${c.id}. **${c.status}** — ${c.text}${cite ? ` (${cite})` : ''}${c.reason ? ` — ${c.reason}` : ''}`);
+      }
     }
     const clamped = clampedByKey.get(it.key) ?? [];
     if (clamped.length) {
@@ -447,6 +460,9 @@ export async function runAnalyzeJob({ job, body, config, redact, log, limiter = 
   // Tách ticket TRƯỚC khi clone: tickets_md hỏng thì không việc gì phải kéo cả
   // một repo về rồi mới báo lỗi.
   const { tickets, source: ticketSource } = resolveTickets(body);
+  // Thiếu thì là 1; khác 1 thì `parseSchemaVersion` ném — và route đã chặn
+  // trước đó, nên tới đây ném là chuyện của một client gọi thẳng hàm này.
+  const schemaVersion = parseSchemaVersion(body.tickets_schema_version);
 
   /**
    * Trần số ticket được chấm trong MỘT job. `0` = không giới hạn.
@@ -511,6 +527,11 @@ export async function runAnalyzeJob({ job, body, config, redact, log, limiter = 
     tickets_total: tickets.length,
     // Ticket đến từ đâu: mảng JSON đã có cấu trúc, hay phép dò trên tickets_md.
     tickets_source: ticketSource,
+    tickets_schema_version: schemaVersion,
+    // Ticket có mô tả bị cắt, và bao nhiêu item mang được bảng chấm từng tiêu chí.
+    tickets_truncated: 0,
+    items_with_assessment: 0,
+    ac_evidence_dropped: 0,
     tickets_skipped: skipped.length,
     max_tickets: maxTickets,
     // Bên gọi xin bao nhiêu, khớp bao nhiêu, còn lại bao nhiêu không quét.
@@ -541,6 +562,8 @@ export async function runAnalyzeJob({ job, body, config, redact, log, limiter = 
     });
 
     const items = [];
+    /** Ticket nào có mô tả bị cắt — để một dòng cảnh báo gọi đúng tên chúng. */
+    const truncatedKeys = [];
     const droppedByKey = new Map();
     const clampedByKey = new Map();
     const failedByKey = new Map();
@@ -619,7 +642,7 @@ export async function runAnalyzeJob({ job, body, config, redact, log, limiter = 
           );
         }
 
-        item = pickItem(parsed, ticket.key);
+        item = pickItem(parsed, ticket.key, { acceptanceCriteria: ticket.acceptance_criteria });
         // `pickItem` chỉ trả về đúng năm field cũ, nên `scan` gắn vào ở đây.
         // Bắt buộc có mặt ở MỌI item — `null` là một câu trả lời hợp lệ ("không
         // biết"), còn thiếu field thì client không phân biệt được với `null`.
@@ -658,6 +681,31 @@ export async function runAnalyzeJob({ job, body, config, redact, log, limiter = 
       stats.evidence_kept += evidence.length;
       stats.evidence_dropped += dropped.length;
       stats.evidence_clamped += clamped.length;
+
+      // Mô tả bị cắt thì item nói ra, không chỉ log: bên nhận đang đọc một kết
+      // luận rút ra từ một nửa đề bài và có quyền biết điều đó.
+      item.truncated = Boolean(ticket.truncated);
+      if (item.truncated) truncatedKeys.push(ticket.key);
+
+      /*
+       * Bằng chứng của TỪNG tiêu chí đi qua đúng bộ lọc của bằng chứng chung.
+       *
+       * Không lọc ở đây thì một đường dẫn bịa vẫn nằm trong `assessment` và
+       * AstraQA hiển thị nó như một trích dẫn kiểm được. Lọc xong mà không còn
+       * dòng nào để chỉ thì trạng thái tụt về `unknown` — cùng luật AstraQA áp
+       * ở đầu bên kia, áp sẵn ở đây để hai bên không nói khác nhau về cùng một
+       * tiêu chí.
+       */
+      if (item.assessment) {
+        for (const c of item.assessment.criteria) {
+          if (!c.evidence.length) continue;
+          const kept = await keepRealEvidence(c.evidence, repoDir, effective);
+          c.evidence = kept.evidence;
+          stats.ac_evidence_dropped += kept.dropped.length;
+          if (c.status !== 'unknown' && !c.evidence.some((ev) => ev.lines)) c.status = 'unknown';
+        }
+        stats.items_with_assessment += 1;
+      }
       // Một dòng cho MỌI ticket, không chỉ ticket có evidence bị loại: đọc log
       // ban đêm cần thấy cả những lượt trôi chảy, nếu không thì im lặng là nhập
       // nhằng giữa "chạy tốt" và "chưa chạy tới".
@@ -711,6 +759,17 @@ export async function runAnalyzeJob({ job, body, config, redact, log, limiter = 
       throw new Error(
         `Bộ lọc bằng chứng loại toàn bộ ${stats.evidence_dropped}/${stats.evidence_dropped} mảnh — ` +
           `kiểm WORKSPACE_DIR/repoDir (repoDir="${repoDir}", tuyệt đối=${path.isAbsolute(repoDir)}).`,
+      );
+    }
+
+    stats.tickets_truncated = truncatedKeys.length;
+    if (truncatedKeys.length) {
+      // Một dòng, gọi đúng tên ticket: "có mô tả bị cắt" mà không nói cắt của
+      // ai thì người đọc phải mở từng item ra dò.
+      warnings.push(
+        `Mô tả dài quá ${MAX_BODY_CHARS} ký tự nên đã bị cắt ở ${truncatedKeys.length} ticket ` +
+          `(${truncatedKeys.slice(0, 10).join(', ')}${truncatedKeys.length > 10 ? '…' : ''}) — ` +
+          'kết luận của chúng dựa trên phần mô tả đã cắt.',
       );
     }
 

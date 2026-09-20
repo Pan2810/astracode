@@ -24,7 +24,92 @@ const STATUS_LABELS = ['status', 'state', 'jira status', 'trạng thái', 'trang
 /** Ký tự ngăn giữa key và tiêu đề trong một dòng: `KEY — tiêu đề`, `KEY: tiêu đề`, `KEY | tiêu đề`. */
 const SEPARATORS = ['—', '–', '·', '|', ' - ', ' -- ', ':'];
 
-const MAX_BODY_CHARS = 4000;
+/**
+ * Trần chữ cho mô tả ticket.
+ *
+ * 4000 là ngưỡng của bản đầu, đặt khi mô tả còn đi qua markdown và thứ dài nhất
+ * là một đoạn văn. Với `tickets` JSON thì `description` là nguyên văn mô tả
+ * Jira — có ticket mang cả bảng, cả log, cả vài nghìn chữ — và cắt ở 4000 là
+ * cắt mất đúng phần nói rõ ticket đòi gì. 12000 đủ cho gần hết những mô tả thật
+ * đã đo, mà vẫn là một trần: không có trần thì một ticket đủ sức làm nổ prompt
+ * của cả job.
+ *
+ * Cắt thì PHẢI NÓI RA (`truncated: true` trên item, một dòng trong `report_md`).
+ * Cắt im lặng nghĩa là model kết luận trên một nửa đề bài và không ai biết.
+ */
+export const MAX_BODY_CHARS = 12_000;
+
+/** Trần số tiêu chí chấp nhận — bằng đúng `max_length=200` của schema AstraQA. */
+export const MAX_ACCEPTANCE_CRITERIA = 200;
+
+/** Phiên bản schema ticket mà bản server này đọc được. */
+export const TICKETS_SCHEMA_VERSION = 1;
+
+/**
+ * Cắt mô tả, và nói rõ là đã cắt.
+ *
+ * @returns {{body: string, truncated: boolean}}
+ */
+function clipBody(raw) {
+  const s = String(raw ?? '').trim();
+  if (s.length <= MAX_BODY_CHARS) return { body: s, truncated: false };
+  return {
+    body: `${s.slice(0, MAX_BODY_CHARS)}\n…(đã cắt ${s.length - MAX_BODY_CHARS} ký tự)`,
+    truncated: true,
+  };
+}
+
+/**
+ * `tickets_schema_version` — phiên bản của chính bộ ticket gửi lên.
+ *
+ * Thiếu thì coi là 1: client bản cũ không gửi field này, và bộ ticket của nó
+ * đúng là v1. Khác 1 thì DỪNG kèm con số nhận được — đoán bừa một schema chưa
+ * biết là cách để một field đổi nghĩa lặng lẽ đi thẳng vào prompt.
+ */
+export function parseSchemaVersion(raw) {
+  if (raw === undefined || raw === null) return TICKETS_SCHEMA_VERSION;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n !== TICKETS_SCHEMA_VERSION) {
+    throw new Error(
+      `tickets_schema_version: bản server này chỉ đọc được schema ${TICKETS_SCHEMA_VERSION}, ` +
+        `nhận được ${JSON.stringify(raw)}.`,
+    );
+  }
+  return n;
+}
+
+/**
+ * `acceptance_criteria: string[]` — mỗi tiêu chí một phần tử, và đó là cả ý nghĩa.
+ *
+ * Một khối chữ gộp thì đọc được nhưng không kiểm được: "code thoả mấy trong năm
+ * tiêu chí" là câu hỏi cần năm thứ. Danh sách vào prompt thành năm dòng đánh số,
+ * và số ấy chính là `id` trong `assessment` trả về — nên thứ tự ở đây là hợp
+ * đồng, không phải trình bày.
+ *
+ * `acceptance_hint` là đường lui cho bên gọi chỉ có một chuỗi. AstraQA dựng nó
+ * bằng `"\n".join(criteria)`, nên tách lại theo dòng là khôi phục đúng danh
+ * sách cũ; một hint một dòng thì thành một tiêu chí.
+ */
+export function parseAcceptance(ticket = {}) {
+  let list = [];
+  const raw = ticket.acceptance_criteria;
+  if (Array.isArray(raw)) {
+    list = raw.map((v) => String(v ?? '').trim());
+  } else if (raw !== undefined && raw !== null && String(raw).trim()) {
+    list = [String(raw).trim()];
+  } else {
+    list = String(ticket.acceptance_hint ?? '')
+      .split(/\r?\n/)
+      .map((v) => v.trim());
+  }
+  list = list.filter(Boolean);
+  if (list.length > MAX_ACCEPTANCE_CRITERIA) {
+    throw new Error(
+      `acceptance_criteria có ${list.length} tiêu chí, trần là ${MAX_ACCEPTANCE_CRITERIA}.`,
+    );
+  }
+  return list;
+}
 
 function norm(s) {
   return String(s).normalize('NFC').trim().toLowerCase().replace(/\s+/g, ' ');
@@ -281,7 +366,12 @@ export function parseTickets(md) {
    */
   const seen = new Map();
   for (const t of tickets) {
-    t.body = t.body.length > MAX_BODY_CHARS ? `${t.body.slice(0, MAX_BODY_CHARS)}\n…(đã cắt)` : t.body;
+    const clipped = clipBody(t.body);
+    t.body = clipped.body;
+    t.truncated = clipped.truncated;
+    // Markdown không có chỗ nào để khai tiêu chí chấp nhận thành danh sách —
+    // đó là một trong những lý do `tickets` JSON tồn tại.
+    t.acceptance_criteria = [];
     const k = norm(t.key);
     if (!seen.has(k)) seen.set(k, []);
     seen.get(k).push(t);
@@ -328,12 +418,21 @@ export function parseJsonTickets(raw) {
     }
     const key = String(t.key ?? '').trim();
     if (!key) throw new Error(`tickets[${i}].key phải là chuỗi không rỗng.`);
-    const body = String(t.description ?? '').trim();
+    const { body, truncated } = clipBody(t.description);
+    let acceptance;
+    try {
+      acceptance = parseAcceptance(t);
+    } catch (err) {
+      throw new Error(`tickets[${i}]: ${err instanceof Error ? err.message : String(err)}`);
+    }
     return {
       key,
       title: String(t.summary ?? '').trim(),
       status: String(t.status ?? '').trim(),
-      body: body.length > MAX_BODY_CHARS ? `${body.slice(0, MAX_BODY_CHARS)}\n…(đã cắt)` : body,
+      body,
+      // Mô tả đã bị cắt hay chưa — đi theo tận item trả về cho AstraQA.
+      truncated,
+      acceptance_criteria: acceptance,
       index: i,
     };
   });

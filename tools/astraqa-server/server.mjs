@@ -30,7 +30,7 @@ import { createAdminRoutes } from './lib/admin.mjs';
 import { createDailyLog } from './lib/daily.mjs';
 import { bearerOf, createAdminAuth, sameSecret } from './lib/adminAuth.mjs';
 import { TIGHTEN_MODE } from './lib/candidates.mjs';
-import { parseJsonTickets, resolveTickets } from './lib/tickets.mjs';
+import { parseJsonTickets, parseSchemaVersion, resolveTickets } from './lib/tickets.mjs';
 
 const MAX_BODY_BYTES = 8 * 1024 * 1024;
 const MAX_JOBS_KEPT = 200;
@@ -348,6 +348,18 @@ export function createServer(config, { log = console.log, persist = true } = {})
        * `failed` kèm message — đổi nó ở đây là đổi hành vi bên dưới chân một
        * client đang chạy.
        */
+      /*
+       * Phiên bản schema đi kèm bộ ticket. Thiếu thì là 1 (client bản cũ không
+       * gửi field này, và bộ ticket của nó đúng là v1). Khác 1 thì DỪNG kèm con
+       * số nhận được: đọc một schema chưa biết bằng luật của v1 là cách để một
+       * field đổi nghĩa lặng lẽ đi thẳng vào prompt.
+       */
+      try {
+        parseSchemaVersion(body.tickets_schema_version);
+      } catch (err) {
+        return sendJson(res, 400, { error: err instanceof Error ? err.message : String(err) });
+      }
+
       if (hasJson) {
         try {
           parseJsonTickets(body.tickets);

@@ -112,11 +112,17 @@ thiếu cả `tickets_md` lẫn `tickets` → `400` kèm tên field thiếu. Sai
 ### Hai cách gửi ticket: `tickets` (JSON) hoặc `tickets_md`
 
 ```json
+"tickets_schema_version": 1,
 "tickets": [
   { "key": "WEB-1001", "summary": "Thêm màn hình đăng nhập (SSO)", "status": "Done",
-    "description": "chi tiết…" }
+    "description": "chi tiết…",
+    "acceptance_criteria": ["Ðăng nhập được bằng mật khẩu", "Sai ba lần thì khoá 15 phút"] }
 ]
 ```
+
+`tickets_schema_version` thiếu → coi là **1** (client bản cũ không gửi field này, và bộ
+ticket của nó đúng là v1). Khác 1 → **400** kèm con số nhận được: đọc một schema chưa
+biết bằng luật của v1 là cách để một field đổi nghĩa lặng lẽ đi thẳng vào prompt.
 
 **Có cả hai thì JSON thắng** — và "thắng" chứ không phải "gộp": gộp nghĩa là phải quyết
 bản nào đúng khi hai nguồn nói khác nhau về cùng một key, và không có câu trả lời đúng
@@ -144,6 +150,57 @@ mà §1.1 cho phép quét — không có khung markdown nào phải bóc.
 Sai kiểu ở `tickets` (không phải mảng, mảng rỗng, phần tử thiếu `key`, key trùng) → `400`
 kèm **chỉ số phần tử**. Còn `tickets_md` hỏng vẫn là job `failed` kèm message, đúng hợp
 đồng cũ — đổi nó là đổi hành vi dưới chân một client đang chạy.
+
+### `acceptance_criteria` → `assessment`: chấm từng tiêu chí
+
+Danh sách chứ không phải một khối chữ, vì "code thoả mấy trong năm tiêu chí" là câu hỏi
+cần năm thứ. Mỗi tiêu chí vào prompt thành **một dòng đánh số**, và số ấy chính là `id`
+trong kết quả — nên thứ tự trong mảng là hợp đồng, không phải trình bày.
+
+`acceptance_hint` là đường lui cho bên gọi chỉ có một chuỗi: AstraQA dựng nó bằng cách
+nối các tiêu chí bằng dấu xuống dòng, nên ở đây nó được tách lại theo dòng. Trần 200
+tiêu chí, bằng đúng `max_length` của schema bên kia.
+
+Ticket có tiêu chí thì item trả về mang thêm `assessment` — **hình dạng này là của
+AstraQA**, đọc ra từ `management-core/src/astraqa_management/code_reconcile.py`
+(`_assessment`), không phải do bên này đặt:
+
+```json
+"assessment": {
+  "criteria": [
+    { "id": 1, "text": "<chữ của bên gọi>", "status": "satisfied | partial | not_satisfied | unknown",
+      "evidence": [{ "path": "src/login.py", "lines": "40-58", "note": "…" }],
+      "reason": "<một câu>" }
+  ]
+}
+```
+
+Ba điều bên này tự áp, và cả ba là để bên kia không phải dọn:
+
+- **`id` và `text` do server đặt lại theo danh sách đã gửi đi**, không lấy của model. Bên
+  kia gộp kết quả nhiều repo theo `id`, nên một `id` model tự đánh là hai kết luận về hai
+  tiêu chí khác nhau chồng lên nhau. Model chỉ được nói `status`, `evidence`, `reason`.
+- **Tiêu chí model không nhắc tới → `unknown`**, bằng chứng rỗng. Một mục cho một tiêu chí
+  đã gửi, không hơn không kém.
+- **`status` khác `unknown` mà không chỉ được dòng nào → tụt về `unknown`.** Bằng chứng của
+  từng tiêu chí đi qua đúng bộ lọc path/line của bằng chứng chung, nên một đường dẫn bịa
+  bị loại và trạng thái dựa trên nó không trụ lại. Ðây cũng là luật `_assessment` áp ở đầu
+  bên kia — áp sẵn ở đây để hai bên không nói khác nhau về cùng một tiêu chí.
+
+Model trả `met`/`unmet`/`fail`… thì được quy về bốn chữ trên. Khoan dung ở đầu vào,
+nghiêm ngặt ở đầu ra — bảng dịch nằm trong `lib/jsonBlock.mjs`, một chỗ duy nhất.
+
+Ticket không có tiêu chí → `assessment: null`. `null` là "không có tiêu chí nào", khác hẳn
+một danh sách toàn `unknown` ("có tiêu chí mà chưa chấm được").
+
+### Mô tả dài: cắt ở 12 000 ký tự, và nói ra
+
+`description` là nguyên văn mô tả Jira — có ticket mang cả bảng, cả log. Trần là **12 000
+ký tự**; dài hơn thì phần đuôi bị cắt và kèm `…(đã cắt N ký tự)` ngay trong prompt.
+
+Cắt thì **phải nói ra**: item mang `truncated: true`, `stats.tickets_truncated` đếm, một
+dòng trong `warnings` gọi đúng tên những ticket bị cắt, và `report_md` ghi **MÔ TẢ ÐÃ CẮT**
+ở ticket ấy. Cắt im lặng nghĩa là model kết luận trên một nửa đề bài mà không ai biết.
 
 ### Key trùng: vẫn là lỗi, và lỗi phải chỉ được chỗ
 
@@ -528,7 +585,7 @@ cd tools/astraqa-server
 node --test test/*.test.mjs
 ```
 
-193 test, **không cần mạng, không cần gateway, không tốn token**: repo git thật được dựng
+201 test, **không cần mạng, không cần gateway, không tốn token**: repo git thật được dựng
 trong thư mục tạm, backend `cli` đóng thế bằng `test/fakeCli.mjs`, backend `fci` đóng thế
 bằng một endpoint OpenAI-compatible dựng tại chỗ — nhưng đi qua đúng mọi bước mà bản chạy
 thật đi.
