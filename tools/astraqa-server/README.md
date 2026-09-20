@@ -106,8 +106,58 @@ Liveness: `curl -sS http://127.0.0.1:8000/healthz` → `{"status":"ok","backend"
 
 ## Hợp đồng
 
-`POST /api/v1/analyze` → `202 {"job_id","status":"queued"}`. Thiếu `repo_url` hoặc
-`tickets_md` → `400` kèm tên field thiếu. Sai/thiếu token → `401`.
+`POST /api/v1/analyze` → `202 {"job_id","status":"queued"}`. Thiếu `repo_url`, hoặc
+thiếu cả `tickets_md` lẫn `tickets` → `400` kèm tên field thiếu. Sai/thiếu token → `401`.
+
+### Hai cách gửi ticket: `tickets` (JSON) hoặc `tickets_md`
+
+```json
+"tickets": [
+  { "key": "WEB-1001", "summary": "Thêm màn hình đăng nhập (SSO)", "status": "Done",
+    "description": "chi tiết…" }
+]
+```
+
+**Có cả hai thì JSON thắng** — và "thắng" chứ không phải "gộp": gộp nghĩa là phải quyết
+bản nào đúng khi hai nguồn nói khác nhau về cùng một key, và không có câu trả lời đúng
+cho việc ấy. `/healthz` khai `accepts_json_tickets: true` để bên gọi dò được thay vì thử
+rồi đoán theo mã lỗi. `result.stats.tickets_source` nói job vừa rồi đã dùng đường nào.
+
+Dùng JSON khi bên gọi đã có từng trường tách bạch — tức là gần như mọi lúc. `tickets_md`
+là một phép **đoán**: nó phải dò ngược cấu trúc từ markdown, và chỗ nó đoán hụt là những
+tiêu đề viết hoàn toàn bình thường. Ví dụ đo được, cùng năm ticket:
+
+| Tiêu đề | qua `tickets_md` | qua `tickets` |
+|---|---|---|
+| `Thêm (SSO) cho web` | giữ nguyên | giữ nguyên |
+| `Sửa lỗi #500 khi upload` | giữ nguyên | giữ nguyên |
+| `Bảng \| cột \| mới` | giữ nguyên | giữ nguyên |
+| `ログイン画面を追加する` | giữ nguyên | giữ nguyên |
+| `Tiêu đề có` + xuống dòng + `phần sau` | **mất phần sau** | giữ nguyên |
+
+Ðếm vẫn đủ năm ticket trong cả hai đường — cái mất là nửa câu tiêu đề, và mất ở chỗ không
+ai nhìn thấy: `queryTerms` quét một tiêu đề cụt rồi ra một verdict nghèo hơn.
+
+`description` vào thẳng `body` của ticket, tức đúng hai trường (`summary` + `description`)
+mà §1.1 cho phép quét — không có khung markdown nào phải bóc.
+
+Sai kiểu ở `tickets` (không phải mảng, mảng rỗng, phần tử thiếu `key`, key trùng) → `400`
+kèm **chỉ số phần tử**. Còn `tickets_md` hỏng vẫn là job `failed` kèm message, đúng hợp
+đồng cũ — đổi nó là đổi hành vi dưới chân một client đang chạy.
+
+### Key trùng: vẫn là lỗi, và lỗi phải chỉ được chỗ
+
+Hai ticket đụng nhau sau khi chuẩn hoá (bỏ hoa/thường, gộp khoảng trắng), nên hai key
+**gốc** có thể trông khác nhau. Thông báo vì thế nói cả hai chữ gốc lẫn hai số dòng:
+
+```
+tickets_md: key bị trùng — "WEB-1001" (dòng 3) và "web-1001" (dòng 8) cùng là key
+"web-1001". Mỗi ticket phải có key riêng.
+```
+
+Với `tickets` JSON thì chỗ được chỉ là chỉ số mảng: `"WEB-1" (tickets[0]) và "web-1"
+(tickets[1])`. Còn `tickets_md` không dò ra cấu trúc nào thì lỗi nói luôn nó đã đọc tới
+đâu: `Ðọc từ dòng 3: "chỉ là một đoạn văn xuôi…"`.
 
 Hai field tuỳ chọn làm mỏng một job:
 
@@ -478,7 +528,7 @@ cd tools/astraqa-server
 node --test test/*.test.mjs
 ```
 
-182 test, **không cần mạng, không cần gateway, không tốn token**: repo git thật được dựng
+193 test, **không cần mạng, không cần gateway, không tốn token**: repo git thật được dựng
 trong thư mục tạm, backend `cli` đóng thế bằng `test/fakeCli.mjs`, backend `fci` đóng thế
 bằng một endpoint OpenAI-compatible dựng tại chỗ — nhưng đi qua đúng mọi bước mà bản chạy
 thật đi.

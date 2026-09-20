@@ -15,7 +15,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { cloneRepo, diffSinceBase } from './git.mjs';
 import { readRepoRules } from './repoRules.mjs';
-import { parseTickets } from './tickets.mjs';
+import { resolveTickets } from './tickets.mjs';
 import { buildPrompt, buildJudgePrompt } from './prompt.mjs';
 import { extractJsonBlock, pickItem } from './jsonBlock.mjs';
 import { matchesAny } from './globs.mjs';
@@ -446,7 +446,7 @@ export async function runAnalyzeJob({ job, body, config, redact, log, limiter = 
 
   // Tách ticket TRƯỚC khi clone: tickets_md hỏng thì không việc gì phải kéo cả
   // một repo về rồi mới báo lỗi.
-  const tickets = parseTickets(body.tickets_md);
+  const { tickets, source: ticketSource } = resolveTickets(body);
 
   /**
    * Trần số ticket được chấm trong MỘT job. `0` = không giới hạn.
@@ -509,6 +509,8 @@ export async function runAnalyzeJob({ job, body, config, redact, log, limiter = 
     judge_parsed: 0,
     judge_failed: 0,
     tickets_total: tickets.length,
+    // Ticket đến từ đâu: mảng JSON đã có cấu trúc, hay phép dò trên tickets_md.
+    tickets_source: ticketSource,
     tickets_skipped: skipped.length,
     max_tickets: maxTickets,
     // Bên gọi xin bao nhiêu, khớp bao nhiêu, còn lại bao nhiêu không quét.

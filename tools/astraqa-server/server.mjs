@@ -30,7 +30,7 @@ import { createAdminRoutes } from './lib/admin.mjs';
 import { createDailyLog } from './lib/daily.mjs';
 import { bearerOf, createAdminAuth, sameSecret } from './lib/adminAuth.mjs';
 import { TIGHTEN_MODE } from './lib/candidates.mjs';
-import { parseTickets } from './lib/tickets.mjs';
+import { parseJsonTickets, resolveTickets } from './lib/tickets.mjs';
 
 const MAX_BODY_BYTES = 8 * 1024 * 1024;
 const MAX_JOBS_KEPT = 200;
@@ -288,6 +288,10 @@ export function createServer(config, { log = console.log, persist = true } = {})
         // Đường nào server này có. Bên gọi dò bằng đây thay vì POST thử rồi
         // đọc 404 — một 404 còn có thể là sai đường dẫn hay sai proxy.
         routes: ['/api/v1/analyze', '/api/v1/judge', '/api/v1/judge/cache'],
+        // `POST /api/v1/analyze` nhận `tickets: [{key, summary, status, description}]`
+        // song song với `tickets_md`. Bên gọi dò bằng đây thay vì thử rồi đoán
+        // theo mã lỗi — một server bản cũ sẽ không có field này.
+        accepts_json_tickets: true,
         // Ðếm nội bộ từ lúc khởi động — KHÔNG hỏi nhà cung cấp, nên đây không
         // phải hạn mức còn lại. Lượt thử lại cũng tính, vì nó cũng là request thật.
         model_calls_this_session: usage.model_calls,
@@ -327,9 +331,29 @@ export function createServer(config, { log = console.log, persist = true } = {})
 
       const missing = [];
       if (typeof body.repo_url !== 'string' || !body.repo_url.trim()) missing.push('repo_url');
-      if (typeof body.tickets_md !== 'string' || !body.tickets_md.trim()) missing.push('tickets_md');
+      // Một trong hai là đủ: `tickets` (JSON, đã có cấu trúc) hoặc `tickets_md`.
+      const hasJson = body.tickets !== undefined && body.tickets !== null;
+      if (!hasJson && (typeof body.tickets_md !== 'string' || !body.tickets_md.trim())) {
+        missing.push('tickets_md hoặc tickets');
+      }
       if (missing.length) {
         return sendJson(res, 400, { error: `thiếu field bắt buộc: ${missing.join(', ')}` });
+      }
+
+      /*
+       * `tickets` (JSON) kiểm ngay ở đây, `tickets_md` thì không — và sự khác
+       * nhau ấy là có chủ ý. Một mảng JSON sai kiểu là sai ở phía người gửi,
+       * sửa trong mười giây khi có 400 kèm chỉ số phần tử. Còn `tickets_md`
+       * hỏng là một phép DÒ không ra, và hợp đồng cũ đã nói nó thành job
+       * `failed` kèm message — đổi nó ở đây là đổi hành vi bên dưới chân một
+       * client đang chạy.
+       */
+      if (hasJson) {
+        try {
+          parseJsonTickets(body.tickets);
+        } catch (err) {
+          return sendJson(res, 400, { error: err instanceof Error ? err.message : String(err) });
+        }
       }
 
       // Hai field lọc: sai KIỂU là sai ở phía người gửi, nên trả 400 ngay thay
@@ -375,15 +399,18 @@ export function createServer(config, { log = console.log, persist = true } = {})
       // Đếm ticket ngay tại đây chỉ để cho vào dòng log — job vẫn tự tách lại và
       // tự báo lỗi nếu `tickets_md` hỏng. Ở đây hỏng thì ghi `?`, không ném.
       let ticketCount = '?';
+      let ticketSource = hasJson ? 'json' : 'markdown';
       try {
-        ticketCount = String(parseTickets(body.tickets_md).length);
+        const resolved = resolveTickets(body);
+        ticketCount = String(resolved.tickets.length);
+        ticketSource = resolved.source;
       } catch {
-        ticketCount = '? (tickets_md chưa dò được)';
+        ticketCount = hasJson ? '? (tickets JSON chưa đọc được)' : '? (tickets_md chưa dò được)';
       }
 
       runLog.line(
         `POST /api/v1/analyze ← ${clientIp(req)} | run_id ${job.run_id ?? '(không có)'} | job ${job.id} | ` +
-          `repo ${body.repo_url} | ref ${body.ref || '(mặc định)'} | ticket ${ticketCount} | ` +
+          `repo ${body.repo_url} | ref ${body.ref || '(mặc định)'} | ticket ${ticketCount} (${ticketSource}) | ` +
           `backend ${['cli', 'fci', 'none'].includes(body.backend) ? `${body.backend} (ép theo request)` : config.judgeBackend}` +
           (Array.isArray(body.tickets_subset) ? ` | subset ${body.tickets_subset.length} key` : '') +
           (body.base_revision ? ` | base ${body.base_revision}` : ''),
