@@ -159,18 +159,25 @@ function fromHeadings(lines, fenced) {
   }
   if (!heads.length) return [];
 
+  // Section headings inside tickets are repeated once per ticket. Counting them
+  // as ticket headings makes a normal AstraQA document parse as duplicate
+  // "description" / "acceptance criteria" tickets.
+  const sectionNames = new Set(['description', 'acceptance criteria']);
+  const ticketHeads = heads.filter((h) => !sectionNames.has(norm(h.text)));
+  if (!ticketHeads.length) return [];
+
   // Cấp "đông nhất" là cấp của ticket: `# Sprint 12` rồi N × `## KEY …` thì
   // ticket nằm ở cấp 2, không phải cấp 1.
   const count = new Map();
-  for (const h of heads) count.set(h.level, (count.get(h.level) ?? 0) + 1);
-  let level = heads[0].level;
+  for (const h of ticketHeads) count.set(h.level, (count.get(h.level) ?? 0) + 1);
+  let level = ticketHeads[0].level;
   for (const [lv, n] of [...count].sort((a, b) => b[1] - a[1] || a[0] - b[0])) {
     level = lv;
     void n;
     break;
   }
 
-  const picked = heads.filter((h) => h.level === level);
+  const picked = ticketHeads.filter((h) => h.level === level);
   const tickets = [];
   for (let i = 0; i < picked.length; i++) {
     const start = picked[i].line;
@@ -254,4 +261,49 @@ export function parseTickets(md) {
   }
 
   return tickets;
+}
+
+/** Structured transport used by AstraQA; Markdown remains for existing callers. */
+export function parseTicketsInput(body) {
+  const hasTickets = Object.hasOwn(body ?? {}, 'tickets');
+  const hasMarkdown = typeof body?.tickets_md === 'string' && Boolean(body.tickets_md.trim());
+  if (!hasTickets) return parseTickets(body?.tickets_md);
+  if (hasMarkdown) throw new Error('Send either tickets or tickets_md, not both.');
+  if (body.tickets_schema_version !== 1) throw new Error('tickets_schema_version must be 1.');
+  if (!Array.isArray(body.tickets) || body.tickets.length === 0) {
+    throw new Error('tickets must be a non-empty array.');
+  }
+  const seen = new Set();
+  return body.tickets.map((raw, index) => {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+      throw new Error(`tickets[${index}] must be an object.`);
+    }
+    const key = typeof raw.key === 'string' ? raw.key.trim() : '';
+    if (!key) throw new Error(`tickets[${index}].key must be a non-empty string.`);
+    const normalized = norm(key);
+    if (seen.has(normalized)) throw new Error(`tickets: duplicate key ${key}.`);
+    seen.add(normalized);
+    const title = raw.summary ?? raw.title ?? '';
+    const status = raw.status ?? '';
+    const description = raw.description ?? '';
+    const acceptance = raw.acceptance_criteria ?? [];
+    if (typeof title !== 'string' || typeof status !== 'string' || typeof description !== 'string') {
+      throw new Error(`tickets[${index}] summary, status and description must be strings.`);
+    }
+    if (!Array.isArray(acceptance) || acceptance.some((criterion) => typeof criterion !== 'string')) {
+      throw new Error(`tickets[${index}].acceptance_criteria must be an array of strings.`);
+    }
+    const bodyText = [
+      description,
+      acceptance.length ? `Acceptance criteria:\n${acceptance.map((criterion, i) => `${i + 1}. ${criterion}`).join('\n')}` : '',
+    ].filter(Boolean).join('\n\n');
+    return {
+      key,
+      title,
+      status,
+      description,
+      acceptance_criteria: [...acceptance],
+      body: bodyText,
+    };
+  });
 }

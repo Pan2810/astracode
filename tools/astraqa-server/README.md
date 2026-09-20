@@ -44,14 +44,22 @@ Ngoài các biến này server không đọc biến cấu hình nào khác. Các
 | Cần | `FPT_BASE_URL`, `FPT_API_KEY`, `FPT_MODEL` | `ASTRACODE_CLI_PATH`, JWT AstraWork | không cần gì |
 | Đổi lại | rẻ, nhanh, đoán được thời gian | sâu hơn, chậm hơn | không phán được "đã xong", chỉ "có nhắc tới" |
 
-**`none` không bao giờ trả `done`.** Một phép quét từ khoá chứng minh được "có chỗ nhắc tới
-thứ này", không chứng minh được "đã làm xong" — trần của nó là `partial`. Dùng để dựng
-đường ống, kiểm hợp đồng với AstraQA, và làm mức nền tất định để so khi model nói khác.
+**`none` hiện trả `done` khi tìm thấy evidence path.** Trong backend này, `done` chỉ
+có nghĩa scanner tìm được candidate theo từ khoá; nó chưa chứng minh code đạt ticket
+hay acceptance criteria. Baseline 190 ticket ở `BASELINE_TRANSPORT.md` có 185 item
+`done` từ `none`. Việc đổi vocabulary/trạng thái thuộc bước tiếp theo của kế hoạch.
 
 Chỗ duy nhất biết ba đường khác nhau là `judgeOnce()` trong `lib/analyze.mjs`; từ đó trở
 đi cùng bộ bóc JSON, cùng bộ lọc evidence, cùng `report_md`. Backend đang chạy được khai ở
 `GET /healthz`, ở `result.backend` và ở đầu `report_md`. Một request có thể ép backend cho
 riêng nó bằng field `"backend": "fci" | "cli" | "none"`.
+
+Với backend `cli`, mỗi ticket tạo trace JSONL từ **AgentLoop thật** ở
+`<ASTRACODE_RUNS_DIR>/traces/<job-id>/<ordinal>.jsonl`; trường
+`item.agent_trace.ref` trỏ tới artifact đó. Trace ghi từng loop, tool call,
+thời lượng/kết quả tool (hash, metadata, error/trust-zone), recovery và
+outcome. Mặc định không ghi nội dung source/tool/model; CLI chỉ ghi excerpt đã
+redact khi chạy với `--trace-content`.
 
 ## b. Khởi động
 
@@ -79,6 +87,27 @@ Muốn chạy thử toàn bộ đường ống mà **không tốn token LLM nào
 `ASTRACODE_CLI_PATH` vào `tools/astraqa-server/test/fakeCli.mjs`.
 
 ## c. Gọi thử
+
+`POST /api/v1/analyze` ưu tiên ticket JSON có schema rõ ràng:
+
+```json
+{
+  "repo_url": "https://example.com/team/repo.git",
+  "tickets_schema_version": 1,
+  "tickets": [
+    {
+      "key": "ORDER-1",
+      "summary": "Create order",
+      "status": "done",
+      "description": "POST /orders creates an order",
+      "acceptance_criteria": ["Returns 201", "Writes exactly one order"]
+    }
+  ]
+}
+```
+
+`tickets` và `tickets_md` loại trừ nhau. `tickets_md` vẫn được nhận cho client cũ;
+JSON giữ description và từng AC thành field riêng, không cắt ngầm nội dung khi parse.
 
 Tạo job:
 
@@ -163,12 +192,19 @@ Một `item`:
 
 ## Chạy test
 
+`items[].assessment` đánh giá từng acceptance criterion riêng với verdict Jira/source.
+Chỉ dẫn chứng file/dòng còn tồn tại được giữ; không có bản ghi chạy test thì
+`test_status: not_run` và tối đa `implemented_unverified`. `mapping_state`
+phân biệt key ticket xuất hiện trong dòng code dẫn chứng (`linked`), chỉ có
+candidate (`weak_link`) và chưa liên kết (`unlinked`). Scan thiếu file vì cap,
+file quá lớn hoặc lỗi đọc mang `complete: false`, không được suy ra JIRA_AHEAD.
+
 ```bash
 cd tools/astraqa-server
 node --test test/*.test.mjs
 ```
 
-47 test, **không cần mạng, không cần gateway, không tốn token**: repo git thật được dựng
+Các test **không cần mạng, không cần gateway, không tốn token**: repo git thật được dựng
 trong thư mục tạm, backend `cli` đóng thế bằng `test/fakeCli.mjs`, backend `fci` đóng thế
 bằng một endpoint OpenAI-compatible dựng tại chỗ — nhưng đi qua đúng mọi bước mà bản chạy
 thật đi.

@@ -1,0 +1,14 @@
+astraqa-server đang lắng nghe
+  cổng          : 8000 (127.0.0.1)
+  backend       : cli
+  model         : (không dùng model qua server)
+  WORKSPACE_DIR : C:\Users\GiaoNT2\Documents\AI Hackathon\PiMHackathon\astracode\.workspace
+  song song     : tối đa 2 lượt judge cùng lúc (cả server)
+  MAX_TICKETS   : 0 (không giới hạn)
+  matcher       : CANDIDATE_MATCHING_SPEC, siết "none" (đóng băng 2026-09-16)
+  logs          : C:\Users\GiaoNT2\Documents\AI Hackathon\PiMHackathon\astracode\tools\astraqa-server\logs
+  results       : C:\Users\GiaoNT2\Documents\AI Hackathon\PiMHackathon\astracode\tools\astraqa-server\results
+  SERVICE_TOKEN : đã set
+  ASTRACODE_CLI : C:\Users\GiaoNT2\Documents\AI Hackathon\PiMHackathon\astracode\packages\cli\dist\main.js
+  ASTRAWORK_JWT : CHƯA set
+2026-09-20T10:17:25.234Z 401 GET /api/v1/analyze/no-such-job ← 127.0.0.1

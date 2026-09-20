@@ -58,6 +58,16 @@ async function poll(jobId, { tries = 200 } = {}) {
   throw new Error('job không kết thúc trong thời gian chờ');
 }
 
+async function pollJudge(jobId) {
+  for (let i = 0; i < 200; i++) {
+    const res = await fetch(`${base}/api/v1/judge/${jobId}`, { headers: { Authorization: `Bearer ${TOKEN}` } });
+    const json = await res.json();
+    if (json.status === 'succeeded' || json.status === 'failed') return json;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error('judge job did not finish');
+}
+
 before(async () => {
   tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'astraqa-test-'));
   server = createServer(
@@ -102,6 +112,62 @@ test('result mang theo backend đã dùng', async () => {
   assert.equal(done.result.backend, 'cli');
   assert.equal(done.result.stats.judge_calls, 1);
   assert.equal(done.result.stats.judge_parsed, 1);
+});
+
+test('judge endpoint uses CLI and reads the pinned source SHA', async () => {
+  const repoUrl = await makeRepo('repo-judge-pin', { 'src/old.ts': 'export const version = 1;\n' });
+  const dir = fileURLToPath(repoUrl);
+  const { stdout } = await run('git', ['rev-parse', 'HEAD'], { cwd: dir });
+  const pinned = stdout.trim();
+  await fs.writeFile(path.join(dir, 'src/old.ts'), 'export const version = 2;\n');
+  await run('git', ['add', '-A'], { cwd: dir });
+  await run('git', ['-c', 'user.email=t@example.invalid', '-c', 'user.name=t', 'commit', '-q', '-m', 'second'], { cwd: dir });
+  const res = await fetch(`${base}/api/v1/judge`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
+    body: JSON.stringify({ repo_url: repoUrl, ref: pinned, verdict_guide: { MATCH: 'signals agree' },
+      tickets: [{ key: 'K-JUDGE', summary: 'old version', evidence: [{ path: 'src/old.ts', lines: '1' }] }] }),
+  });
+  assert.equal(res.status, 202);
+  const done = await pollJudge((await res.json()).job_id);
+  assert.equal(done.status, 'succeeded', done.error);
+  assert.equal(done.source_revision, pinned);
+  assert.equal(done.results[0].verdict, 'MATCH');
+  assert.equal(done.results[0].tier, 'ai');
+});
+
+test('structured tickets run through the server with distinct keys and AC', async () => {
+  const repoUrl = await makeRepo('repo-structured', { 'src/orders.ts': 'export const orders = [];\n' });
+  const res = await post({
+    repo_url: repoUrl,
+    tickets_schema_version: 1,
+    tickets: [
+      { key: 'A-1', summary: 'Create order', status: 'done',
+        description: 'POST /orders creates an order.\n### acceptance criteria is text here.',
+        acceptance_criteria: ['Returns 201', 'Writes one order'] },
+      { key: 'B-1', summary: 'Reject invalid order', status: 'in_progress',
+        description: 'Reject an empty customer ID.', acceptance_criteria: ['Returns 400'] },
+    ],
+  });
+  assert.equal(res.status, 202);
+  const done = await poll((await res.json()).job_id);
+  assert.equal(done.status, 'succeeded', done.error);
+  assert.deepEqual(done.result.items.map((item) => item.key), ['A-1', 'B-1']);
+  assert.equal(done.result.items[0].assessment.state, 'partial');
+  assert.deepEqual(done.result.items[0].assessment.criteria.map((criterion) => criterion.status), ['satisfied', 'unknown']);
+  assert.equal(done.result.items[0].assessment.test_status, 'not_run');
+  assert.equal(done.result.items[0].mapping_state, 'weak_link');
+  assert.equal(done.result.items[1].assessment.state, 'not_assessed');
+  assert.equal(done.result.stats.judge_calls, 2);
+  assert.match(done.result.source_revision, /^[a-f0-9]{40}$/);
+});
+
+test('structured tickets reject ambiguous or malformed input before cloning', async () => {
+  const common = { repo_url: 'https://example.invalid/repo.git', tickets_schema_version: 1 };
+  const ticket = { key: 'A-1', summary: 'Create order', description: 'details', acceptance_criteria: ['Returns 201'] };
+  assert.equal((await post({ ...common, tickets: [ticket], tickets_md: '## A-1' })).status, 400);
+  assert.equal((await post({ ...common, tickets: [ticket, ticket] })).status, 400);
+  assert.equal((await post({ ...common, tickets: [{ ...ticket, acceptance_criteria: 'Returns 201' }] })).status, 400);
 });
 
 test('thiếu/sai token → 401', async () => {

@@ -67,6 +67,7 @@ import { MarkdownStream } from './markdown.js';
 import { layout } from './home.js';
 import { ensureProjectTrust, ensureWorkspaceTrust, isTrusted } from './trust.js';
 import { c, out, write } from './ui.js';
+import { AgentTrace, type TraceOptions } from './trace.js';
 
 /**
  * Lệnh dựng sẵn. Đứng trên cùng trong ô gợi ý và thắng mọi trùng tên — xem
@@ -124,11 +125,16 @@ export async function runChat(args: string[]): Promise<void> {
   const session = buildSession();
   const root = process.cwd();
   const interactive = Boolean(process.stdin.isTTY);
+  const traceOptions = traceOptionsFrom(args);
+  // Consume trace options before parsing `-p`: otherwise a trace filename
+  // would accidentally be sent to the model as part of the user's prompt.
+  const chatArgs = withoutTraceOptions(args);
+  const trace = traceOptions ? new AgentTrace(traceOptions, newSessionId()) : undefined;
 
   await session.registry.load();
 
   let mode: PermissionMode = session.config.permissionMode;
-  const modeFlag = args.find((a) => a.startsWith('--mode='));
+  const modeFlag = chatArgs.find((a) => a.startsWith('--mode='));
   if (modeFlag) mode = modeFlag.slice('--mode='.length) as PermissionMode;
 
   // Trần của tổ chức (M9). Áp SAU cờ dòng lệnh một cách có chủ ý: `--mode` là
@@ -145,7 +151,7 @@ export async function runChat(args: string[]): Promise<void> {
   });
   mode = effective.permissionMode as PermissionMode;
 
-  const markdown = markdownEnabled(args);
+  const markdown = markdownEnabled(chatArgs);
   const permissions = new PermissionManager({
     mode,
     logger: session.logger,
@@ -415,7 +421,7 @@ export async function runChat(args: string[]): Promise<void> {
   // Dùng cho script và CI. Quyền ở đây do `nonInteractiveAsker` xử lý — nó TỪ
   // CHỐI mọi thứ cần hỏi, vì tự duyệt khi không ai ngồi xem là bỏ hẳn cổng
   // quyền đúng vào lúc nó cần nhất.
-  const oneShot = readOneShotPrompt(args);
+  const oneShot = readOneShotPrompt(chatArgs);
   if (oneShot !== undefined) {
     if (!oneShot.trim()) {
       out(c.red('  Không có câu hỏi nào.'));
@@ -428,7 +434,7 @@ export async function runChat(args: string[]): Promise<void> {
       process.exitCode = 2;
       return;
     }
-    await runTurn(makeLoop(resolved), await prepare(resolved), [], markdown);
+    await runTurn(makeLoop(resolved), await prepare(resolved), [], markdown, trace);
     return;
   }
 
@@ -505,7 +511,7 @@ export async function runChat(args: string[]): Promise<void> {
     if (budget.shouldCompact(history)) {
       history = await compactNow(history, compactDeps, 'auto');
     }
-    history = await runTurn(makeLoop(input), await prepare(input), history, markdown);
+    history = await runTurn(makeLoop(input), await prepare(input), history, markdown, trace);
     // Lượt vừa rồi có thể vừa tạo file mới — chỉ mục `@` phải biết.
     fileIndex.invalidate();
     out('');
@@ -819,6 +825,7 @@ async function runTurn(
   message: string,
   history: ChatMessage[],
   markdown: boolean,
+  trace?: AgentTrace,
 ): Promise<ChatMessage[]> {
   const controller = new AbortController();
   const onSigint = (): void => controller.abort();
@@ -832,11 +839,14 @@ async function runTurn(
     : undefined;
 
   try {
+    const turnId = newSessionId();
+    trace?.beginTurn(turnId, message);
     const gen = loop.run(message, history, controller.signal);
     let printedText = false;
     for (;;) {
       const next = await gen.next();
       if (next.done) {
+        trace?.finishTurn(turnId, next.value);
         md?.end();
         if (next.value.stoppedBy === 'iteration_limit') {
           out(c.yellow('\n  Chạm trần số vòng lặp — hỏi tiếp để agent làm nốt.'));
@@ -852,6 +862,7 @@ async function runTurn(
         if (printedText) out('');
         return next.value.messages.filter((m) => m.role !== 'system');
       }
+      trace?.event(turnId, next.value);
       renderEvent(next.value, () => {
         printedText = true;
       }, md);
@@ -864,6 +875,34 @@ async function runTurn(
   } finally {
     process.off('SIGINT', onSigint);
   }
+}
+
+/** Trace flags are opt-in and are never passed through to prompt parsing. */
+function traceOptionsFrom(args: string[]): TraceOptions | undefined {
+  const named = args.findIndex((arg) => arg === '--trace-jsonl');
+  const inline = args.find((arg) => arg.startsWith('--trace-jsonl='));
+  const file = inline?.slice('--trace-jsonl='.length) || (named >= 0 ? args[named + 1] : '');
+  if (!file) {
+    if (named >= 0 || inline || args.includes('--trace-content')) {
+      throw new Error('--trace-jsonl needs a destination file.');
+    }
+    return undefined;
+  }
+  return { file, includeContent: args.includes('--trace-content') };
+}
+
+function withoutTraceOptions(args: string[]): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i]!;
+    if (arg === '--trace-content' || arg.startsWith('--trace-jsonl=')) continue;
+    if (arg === '--trace-jsonl') {
+      i++;
+      continue;
+    }
+    out.push(arg);
+  }
+  return out;
 }
 
 /**

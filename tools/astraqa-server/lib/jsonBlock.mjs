@@ -90,5 +90,6 @@ export function pickItem(parsed, ticketKey) {
     confidence,
     evidence,
     reason,
+    ac_assessment: Array.isArray(item.ac_assessment) ? item.ac_assessment : [],
   };
 }

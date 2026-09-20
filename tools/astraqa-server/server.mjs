@@ -22,11 +22,12 @@ import { fileURLToPath } from 'node:url';
 import { makeRedactor, redactMessage } from './lib/redact.mjs';
 import { loadDotEnv } from './lib/env.mjs';
 import { runAnalyzeJob } from './lib/analyze.mjs';
+import { runJudgeJob } from './lib/judgeJob.mjs';
 import { createRunLog, bannerLines } from './lib/observe.mjs';
 import { createLimiter } from './lib/limit.mjs';
 import { createAdminRoutes } from './lib/admin.mjs';
 import { TIGHTEN_MODE } from './lib/candidates.mjs';
-import { parseTickets } from './lib/tickets.mjs';
+import { parseTicketsInput } from './lib/tickets.mjs';
 
 const MAX_BODY_BYTES = 8 * 1024 * 1024;
 const MAX_JOBS_KEPT = 200;
@@ -241,6 +242,14 @@ export function createServer(config, { log = console.log, persist = true } = {})
       });
   }
 
+  function startJudge(job, body) {
+    const redact = makeRedactor([config.serviceToken, config.astraworkJwt, config.fciApiKey, body.repo_token]);
+    job.status = 'running';
+    usage.jobs += 1;
+    runJudgeJob({ job, body, config, redact, limiter, usage })
+      .catch((err) => { job.status = 'failed'; job.error = redactMessage(err, redact); });
+  }
+
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://localhost');
     const route = url.pathname.replace(/\/+$/, '') || '/';
@@ -295,9 +304,18 @@ export function createServer(config, { log = console.log, persist = true } = {})
 
       const missing = [];
       if (typeof body.repo_url !== 'string' || !body.repo_url.trim()) missing.push('repo_url');
-      if (typeof body.tickets_md !== 'string' || !body.tickets_md.trim()) missing.push('tickets_md');
+      if (!Object.hasOwn(body, 'tickets') && (typeof body.tickets_md !== 'string' || !body.tickets_md.trim())) {
+        missing.push('tickets or tickets_md');
+      }
       if (missing.length) {
         return sendJson(res, 400, { error: `thiếu field bắt buộc: ${missing.join(', ')}` });
+      }
+      if (Object.hasOwn(body, 'tickets')) {
+        try {
+          parseTicketsInput(body);
+        } catch (err) {
+          return sendJson(res, 400, { error: err instanceof Error ? err.message : String(err) });
+        }
       }
 
       const job = {
@@ -332,7 +350,7 @@ export function createServer(config, { log = console.log, persist = true } = {})
       // tự báo lỗi nếu `tickets_md` hỏng. Ở đây hỏng thì ghi `?`, không ném.
       let ticketCount = '?';
       try {
-        ticketCount = String(parseTickets(body.tickets_md).length);
+        ticketCount = String(parseTicketsInput(body).length);
       } catch {
         ticketCount = '? (tickets_md chưa dò được)';
       }
@@ -346,6 +364,30 @@ export function createServer(config, { log = console.log, persist = true } = {})
       sendJson(res, 202, { job_id: job.id, status: 'queued' });
       start(job, body, runLog);
       return;
+    }
+
+    if (route === '/api/v1/judge' && req.method === 'POST') {
+      let body;
+      try { body = JSON.parse((await readBody(req)) || '{}'); } catch { return sendJson(res, 400, { error: 'body must be valid JSON' }); }
+      if (!body || typeof body !== 'object' || Array.isArray(body)) return sendJson(res, 400, { error: 'body must be an object' });
+      if (typeof body.repo_url !== 'string' || !body.repo_url.trim() || !Array.isArray(body.tickets) || !body.tickets.length || !body.verdict_guide || typeof body.verdict_guide !== 'object') {
+        return sendJson(res, 400, { error: 'repo_url, tickets and verdict_guide are required' });
+      }
+      const job = { id: randomUUID(), run_id: body.run_id ?? null, status: 'queued', done: 0, total: body.tickets.length, results: [], error: undefined, source_revision: '', current: undefined, abort: new AbortController(), createdAt: Date.now() };
+      jobs.set(job.id, job);
+      while (jobs.size > MAX_JOBS_KEPT) jobs.delete(jobs.keys().next().value);
+      sendJson(res, 202, { job_id: job.id, total: job.total, status: 'queued' });
+      startJudge(job, body);
+      return;
+    }
+
+    const judgeMatch = /^\/api\/v1\/judge\/([^/]+)$/.exec(route);
+    if (judgeMatch) {
+      const job = jobs.get(decodeURIComponent(judgeMatch[1]));
+      if (!job) return sendJson(res, 404, { error: 'job_id not found' });
+      if (req.method === 'DELETE') { job.abort.abort(); job.status = 'cancelled'; return sendJson(res, 200, { status: 'cancelled', done: job.done, total: job.total, results: job.results }); }
+      if (req.method !== 'GET') return sendJson(res, 405, { error: 'method not allowed' });
+      return sendJson(res, 200, { status: job.status, done: job.done, total: job.total, results: job.results, ...(job.error ? { error: job.error } : {}), ...(job.source_revision ? { source_revision: job.source_revision } : {}) });
     }
 
     const m = /^\/api\/v1\/analyze\/([^/]+)$/.exec(route);

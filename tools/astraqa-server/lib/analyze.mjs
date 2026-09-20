@@ -14,7 +14,7 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { cloneRepo } from './git.mjs';
-import { parseTickets } from './tickets.mjs';
+import { parseTicketsInput } from './tickets.mjs';
 import { buildPrompt, buildJudgePrompt } from './prompt.mjs';
 import { extractJsonBlock, pickItem } from './jsonBlock.mjs';
 import { matchesAny } from './globs.mjs';
@@ -23,6 +23,7 @@ import { judgeWithoutModel } from './noneJudge.mjs';
 import { buildRepoContext, renderContext } from './repoContext.mjs';
 import { createLimiter } from './limit.mjs';
 import { buildIndex } from './candidates.mjs';
+import { normalizeAssessment, notAssessed } from './assessment.mjs';
 
 export const DEFAULT_OPTIONS = {
   max_files_per_ticket: 5,
@@ -48,9 +49,13 @@ function childEnv(astraworkToken) {
   return env;
 }
 
-function runCli({ cliPath, cwd, prompt, astraworkToken, timeoutMs, signal }) {
+export function runCli({ cliPath, cwd, prompt, astraworkToken, timeoutMs, signal, traceFile = '' }) {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [cliPath, '--mode=plan', '--raw', '-p', prompt], {
+    const args = [cliPath, '--mode=plan', '--raw'];
+    // Produced by the real CLI/AgentLoop rather than inferred from stdout.
+    if (traceFile) args.push('--trace-jsonl', traceFile);
+    args.push('-p', prompt);
+    const child = spawn(process.execPath, args, {
       cwd,
       env: childEnv(astraworkToken),
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -91,7 +96,7 @@ function runCli({ cliPath, cwd, prompt, astraworkToken, timeoutMs, signal }) {
  * Một lượt judge cho một ticket. Trả về văn bản thô của model — phần bóc JSON
  * nằm ngoài, dùng chung cho cả hai backend.
  */
-async function judgeOnce({ backend, ticket, options, repoDir, config, timeoutMs, redact, job, log, stats, limiter, usage, index }) {
+async function judgeOnce({ backend, ticket, options, repoDir, config, timeoutMs, redact, job, log, stats, limiter, usage, index, traceFile = '' }) {
   if (backend === 'none') {
     // Không có model nên không có gì để bóc: trả thẳng object đã dựng, nhưng nó
     // vẫn đi qua `pickItem` như hai backend kia để không có đường nào lách được
@@ -110,11 +115,28 @@ async function judgeOnce({ backend, ticket, options, repoDir, config, timeoutMs,
       astraworkToken: job.astraworkToken,
       timeoutMs,
       signal: job.abort?.signal,
+      traceFile,
     });
     if (res.timedOut) throw new Error(`Ticket "${ticket.key}": CLI quá ${Math.round(timeoutMs / 1000)}s, đã bị dừng.`);
     // Agent tự quyết đọc file nào bằng tool của nó; server không có bản ghi phép
     // quét ấy. Bịa một con số ở đây là tệ hơn nói không biết.
-    return { text: res.stdout, scan: null, note: `CLI thoát với mã ${res.code}`, stderr: res.stderr };
+    let traceRef = '';
+    if (traceFile) {
+      try {
+        await fs.access(traceFile);
+        traceRef = path.relative(config.runsDir, traceFile).replace(/\\/g, '/');
+      } catch {
+        // A trace is supplementary provenance, never a fabricated artifact.
+        log(`CLI ${ticket.key}: trace không được tạo; không gắn trace_ref.`);
+      }
+    }
+    return {
+      text: res.stdout,
+      scan: null,
+      note: `CLI thoát với mã ${res.code}`,
+      stderr: res.stderr,
+      ...(traceRef ? { trace_ref: traceRef } : {}),
+    };
   }
 
   if (!fciConfigured(config)) {
@@ -220,6 +242,12 @@ export async function keepRealEvidence(evidence, repoDir, options) {
     }
     let stat;
     try {
+      const real = await fs.realpath(abs);
+      const realRepo = await fs.realpath(repoDir);
+      if (real !== realRepo && !real.startsWith(realRepo + path.sep)) {
+        drop('symlink points outside repo');
+        continue;
+      }
       stat = await fs.stat(abs);
     } catch {
       drop('không tồn tại trong repo');
@@ -268,6 +296,27 @@ export async function keepRealEvidence(evidence, repoDir, options) {
   }
 
   return { evidence: kept, dropped, clamped };
+}
+
+/** A link is a source reference to the ticket key, not proof that the AC passed. */
+async function mappingState(ticket, evidence, repoDir) {
+  if (!evidence.length) return 'unlinked';
+  const key = String(ticket.key ?? '').toLowerCase();
+  for (const citation of evidence) {
+    if (!citation.lines) continue;
+    const match = /^(\d+)(?:-(\d+))?$/.exec(citation.lines);
+    if (!match) continue;
+    try {
+      const lines = (await fs.readFile(path.resolve(repoDir, citation.path), 'utf8')).split(/\r?\n/);
+      const start = Number(match[1]);
+      const end = Number(match[2] || match[1]);
+      if (lines.slice(start - 1, end).some((line) => line.toLowerCase().includes(key))) return 'linked';
+    } catch {
+      // The citation validator already ran; a later read failure can only
+      // lower this to a weak link, never manufacture a strong one.
+    }
+  }
+  return 'weak_link';
 }
 
 function buildReportMd({ runId, generatedAt, backend, repoUrl, ref, head, items, tickets, droppedByKey, clampedByKey, failedByKey, stats }) {
@@ -385,9 +434,9 @@ export async function runAnalyzeJob({ job, body, config, redact, log, limiter = 
 
   const backend = ['cli', 'fci', 'none'].includes(body.backend) ? body.backend : config.judgeBackend;
 
-  // Tách ticket TRƯỚC khi clone: tickets_md hỏng thì không việc gì phải kéo cả
+  // Tách ticket TRƯỚC khi clone: input hỏng thì không việc gì phải kéo cả
   // một repo về rồi mới báo lỗi.
-  const tickets = parseTickets(body.tickets_md);
+  const tickets = parseTicketsInput(body);
 
   /**
    * Trần số ticket được chấm trong MỘT job. `0` = không giới hạn.
@@ -486,8 +535,12 @@ export async function runAnalyzeJob({ job, body, config, redact, log, limiter = 
        */
       let item;
       try {
+        // Ticket keys are request input, so use an ordinal for the filename.
+        const traceFile = backend === 'cli'
+          ? path.join(config.runsDir, 'traces', job.id, `${items.length + 1}.jsonl`)
+          : '';
         const res = await judgeOnce({
-          backend, ticket, options: effective, repoDir, config, timeoutMs, redact, job, log, stats, limiter, usage, index,
+          backend, ticket, options: effective, repoDir, config, timeoutMs, redact, job, log, stats, limiter, usage, index, traceFile,
         });
 
         let parsed;
@@ -501,6 +554,7 @@ export async function runAnalyzeJob({ job, body, config, redact, log, limiter = 
         }
 
         item = pickItem(parsed, ticket.key);
+        if (res.trace_ref) item.agent_trace = { schema_version: 1, ref: res.trace_ref };
         // `pickItem` chỉ trả về đúng năm field cũ, nên `scan` gắn vào ở đây.
         // Bắt buộc có mặt ở MỌI item — `null` là một câu trả lời hợp lệ ("không
         // biết"), còn thiếu field thì client không phân biệt được với `null`.
@@ -524,6 +578,8 @@ export async function runAnalyzeJob({ job, body, config, redact, log, limiter = 
           reason: `judge_failed: ${why}`,
           // Lượt hỏng nghĩa là chưa quét được gì — `null`, không phải 0.
           scan: null,
+          assessment: notAssessed(ticket),
+          mapping_state: 'unlinked',
         });
         stats.items_without_scan += 1;
         droppedByKey.set(ticket.key, []);
@@ -534,6 +590,11 @@ export async function runAnalyzeJob({ job, body, config, redact, log, limiter = 
 
       const { evidence, dropped, clamped } = await keepRealEvidence(item.evidence, repoDir, effective);
       item.evidence = evidence;
+      item.mapping_state = await mappingState(ticket, evidence, repoDir);
+      item.assessment = await normalizeAssessment({
+        raw: item.ac_assessment, ticket, repoDir, options: effective, validateEvidence: keepRealEvidence,
+      });
+      delete item.ac_assessment;
       droppedByKey.set(item.key, dropped);
       clampedByKey.set(item.key, clamped);
       stats.evidence_kept += evidence.length;
@@ -556,7 +617,7 @@ export async function runAnalyzeJob({ job, body, config, redact, log, limiter = 
     }
 
     // Ticket vượt trần vẫn có mặt trong báo cáo, chỉ nói rõ là chưa xét. Bỏ hẳn
-    // chúng khỏi `items` sẽ khiến AstraQA tưởng `tickets_md` chỉ có bấy nhiêu.
+    // chúng khỏi `items` sẽ khiến AstraQA tưởng input chỉ có bấy nhiêu.
     for (const ticket of skipped) {
       items.push({
         key: ticket.key,
@@ -566,6 +627,8 @@ export async function runAnalyzeJob({ job, body, config, redact, log, limiter = 
         reason: 'skipped_quota_limit',
         // Chưa xét lần nào thì cũng chưa quét lần nào.
         scan: null,
+        assessment: notAssessed(ticket),
+        mapping_state: 'unlinked',
       });
       stats.items_without_scan += 1;
       droppedByKey.set(ticket.key, []);
