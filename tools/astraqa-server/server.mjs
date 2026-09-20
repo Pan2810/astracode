@@ -21,7 +21,7 @@ import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { makeRedactor, redactMessage } from './lib/redact.mjs';
 import { loadDotEnv } from './lib/env.mjs';
-import { runAnalyzeJob } from './lib/analyze.mjs';
+import { runAnalyzeJob, parseSubset } from './lib/analyze.mjs';
 import { runJudgeJob, parseSelection } from './lib/judge.mjs';
 import { CACHE_DIRNAME, cacheStats, parseDuration, safeTenant, sweepCache } from './lib/judgeCache.mjs';
 import { createRunLog, bannerLines } from './lib/observe.mjs';
@@ -332,6 +332,18 @@ export function createServer(config, { log = console.log, persist = true } = {})
         return sendJson(res, 400, { error: `thiếu field bắt buộc: ${missing.join(', ')}` });
       }
 
+      // Hai field lọc: sai KIỂU là sai ở phía người gửi, nên trả 400 ngay thay
+      // vì để job chạy tới lúc clone xong mới chết. `base_revision` trỏ vào một
+      // commit không có thật thì KHÔNG phải lỗi — xem `diffSinceBase`.
+      try {
+        parseSubset(body.tickets_subset);
+      } catch (err) {
+        return sendJson(res, 400, { error: err instanceof Error ? err.message : String(err) });
+      }
+      if (body.base_revision !== undefined && body.base_revision !== null && typeof body.base_revision !== 'string') {
+        return sendJson(res, 400, { error: '"base_revision" phải là một chuỗi (sha, tag hoặc tên nhánh).' });
+      }
+
       const job = {
         id: randomUUID(),
         run_id: body.run_id ?? null,
@@ -372,7 +384,9 @@ export function createServer(config, { log = console.log, persist = true } = {})
       runLog.line(
         `POST /api/v1/analyze ← ${clientIp(req)} | run_id ${job.run_id ?? '(không có)'} | job ${job.id} | ` +
           `repo ${body.repo_url} | ref ${body.ref || '(mặc định)'} | ticket ${ticketCount} | ` +
-          `backend ${['cli', 'fci', 'none'].includes(body.backend) ? `${body.backend} (ép theo request)` : config.judgeBackend}`,
+          `backend ${['cli', 'fci', 'none'].includes(body.backend) ? `${body.backend} (ép theo request)` : config.judgeBackend}` +
+          (Array.isArray(body.tickets_subset) ? ` | subset ${body.tickets_subset.length} key` : '') +
+          (body.base_revision ? ` | base ${body.base_revision}` : ''),
       );
 
       sendJson(res, 202, { job_id: job.id, status: 'queued' });

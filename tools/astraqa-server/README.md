@@ -109,11 +109,67 @@ Liveness: `curl -sS http://127.0.0.1:8000/healthz` → `{"status":"ok","backend"
 `POST /api/v1/analyze` → `202 {"job_id","status":"queued"}`. Thiếu `repo_url` hoặc
 `tickets_md` → `400` kèm tên field thiếu. Sai/thiếu token → `401`.
 
+Hai field tuỳ chọn làm mỏng một job:
+
+| Field | Là gì |
+|---|---|
+| `tickets_subset` | Mảng ticket key. **Chỉ quét evidence cho những key này**; repo vẫn clone đủ |
+| `base_revision` | Mốc so sánh. Có thì kết quả mang thêm `changed_files[]` = `git diff --name-only base..HEAD` |
+
+### `tickets_subset` — quét ít, vẫn trả đủ bảng
+
+Thứ đắt trong một job không phải bản clone mà là những lượt quét và những lượt gọi
+model. Bên gọi đã biết 184 ticket kia không đổi gì từ lần chạy trước thì không có lý do
+bắt server chấm lại chúng.
+
+Ticket ngoài tập **không biến mất khỏi `items`** — chúng về với `reason: "not_in_subset"`,
+`code_status: "missing"`, `confidence: 0`, `scan: null`. Cùng một luật với
+`skipped_quota_limit`: một ticket vắng mặt trông y như một ticket đã xét và không thấy
+gì, và bỏ hẳn nó đi sẽ khiến AstraQA đọc bảng thành "`tickets_md` chỉ có bấy nhiêu".
+`report_md` gọi những dòng ấy là **KHÔNG QUÉT**, khác chữ **BỎ QUA** của trần hạn mức.
+
+Thứ tự hai phép lọc là có chủ ý: **tập con của bên gọi áp trước**, `ASTRACODE_MAX_TICKETS`
+áp sau. Ðảo lại thì bên gọi xin 6 ticket cuối bảng sẽ nhận về không ticket nào mà không
+có gì nói vì sao.
+
+Mảng rỗng → `400` (gửi mảng rỗng nghĩa là không quét gì; bỏ hẳn field nếu muốn quét tất
+cả). Key không có trong `tickets_md` → chỉ là **cảnh báo**: nó thường là ticket vừa bị
+xoá bên kế hoạch.
+
+### `base_revision` — những tệp đã đổi từ mốc ấy
+
+Bản clone là `--depth 1` nên `base` gần như chắc chắn chưa có mặt. Server đào thêm lịch
+sử theo đúng thứ tự từ rẻ tới đắt, kiểm lại sau mỗi lần và dừng ngay khi đủ: `fetch
+origin <base>` → `--deepen 100` → `--deepen 500` → `--unshallow`.
+
+Ba trạng thái, phân biệt bằng đúng hai field:
+
+| | `base_revision` (trả về) | `changed_files` | cảnh báo |
+|---|---|---|---|
+| Không hỏi | `null` | `null` | không |
+| Hỏi, lấy được | `<sha đầy đủ>` | `["src/a.py", …]` | không |
+| Hỏi, không thấy | `null` | `null` | **có** |
+
+`changed_files` là `null` chứ không phải `[]` khi không biết: một mảng rỗng là câu trả
+lời "không tệp nào đổi", và hai chuyện ấy khác nhau.
+
+**Base không tìm thấy KHÔNG phải lỗi.** Nó là thứ bên gọi nhớ từ lần chạy trước — có thể
+đã bị force-push đè, có thể thuộc một fork, có thể gõ nhầm. Ðánh hỏng cả job vì chuyện ấy
+là vứt đi 184 lượt phân tích đã chạy xong để đổi lấy một danh sách tệp phụ trợ. Sai
+**kiểu** (`tickets_subset` không phải mảng, `base_revision` không phải chuỗi) thì vẫn là
+`400` ngay, vì đó là sai ở phía người gửi.
+
+Kết quả job mang thêm `warnings: []` — luôn có mặt, mảng rỗng khi không có gì, để bên gọi
+không phải phân biệt "không có cảnh báo" với "bản server này chưa biết field ấy". Cảnh
+báo cũng hiện thành một khối `> **Cảnh báo:**` ở đầu `report_md`.
+
 `GET /api/v1/analyze/{job_id}` → một trong:
 
 ```json
 {"status":"running",   "progress":{"done":3,"total":10}, "current":"WEB-1001"}
-{"status":"succeeded", "result":{ "run_id":…, "generated_at":…, "items":[…], "report_md":… }}
+{"status":"succeeded", "result":{ "run_id":…, "generated_at":…, "source_revision":…,
+                                  "base_revision":…, "changed_files":…, "warnings":[],
+                                  "items":[…], "report_md":… }}
 {"status":"failed",    "error":"<message đã che token>"}
 ```
 
@@ -422,7 +478,7 @@ cd tools/astraqa-server
 node --test test/*.test.mjs
 ```
 
-176 test, **không cần mạng, không cần gateway, không tốn token**: repo git thật được dựng
+182 test, **không cần mạng, không cần gateway, không tốn token**: repo git thật được dựng
 trong thư mục tạm, backend `cli` đóng thế bằng `test/fakeCli.mjs`, backend `fci` đóng thế
 bằng một endpoint OpenAI-compatible dựng tại chỗ — nhưng đi qua đúng mọi bước mà bản chạy
 thật đi.
