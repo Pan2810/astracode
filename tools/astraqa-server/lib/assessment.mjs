@@ -7,7 +7,30 @@ export function notAssessed(ticket) {
   return { state: 'not_assessed', test_status: 'not_run', criteria };
 }
 
-export async function normalizeAssessment({ raw, ticket, repoDir, options, validateEvidence }) {
+/**
+ * Hai chiều khẳng định, và chúng KHÔNG chịu chung một luật.
+ *
+ * - `satisfied` / `partial` là khẳng định DƯƠNG: "có code làm việc này". Bằng
+ *   chứng cho nó là một dòng mở được, nên thiếu dòng ấy thì hạ về `unknown`.
+ * - `not_satisfied` là khẳng định ÂM: "đã tìm và không có". Một tiêu chí chưa
+ *   làm thì tự nhiên KHÔNG có dẫn chứng — đòi dẫn chứng ở đây là đòi một thứ
+ *   không thể tồn tại, và bản trước vì thế hạ mọi `not_satisfied` về `unknown`,
+ *   khiến `state: "not_implemented"` gần như không bao giờ đạt tới. Ðiều kiện
+ *   đúng cho chiều âm là PHẠM VI QUÉT: lượt này có thật sự đi tìm không.
+ * - `unknown` luôn nhận: nó chính là câu trả lời khi hai điều kiện trên hụt.
+ *
+ * `coverage` do người gọi tính và truyền vào (xem `analyze.mjs`), vì chỉ bên đó
+ * biết lượt này có bản ghi quét đầy đủ hay một phiên agent đã tự duyệt repo.
+ * Mặc định `false` — không nói gì thì coi như chưa chứng minh được là đã tìm.
+ */
+function decide(claimed, hasEvidence, coverage) {
+  if (!STATUSES.has(claimed)) return 'unknown';
+  if (claimed === 'unknown') return 'unknown';
+  if (claimed === 'not_satisfied') return coverage ? 'not_satisfied' : 'unknown';
+  return hasEvidence ? claimed : 'unknown';
+}
+
+export async function normalizeAssessment({ raw, ticket, repoDir, options, validateEvidence, coverage = false }) {
   const requested = Array.isArray(ticket.acceptance_criteria) ? ticket.acceptance_criteria : [];
   if (!requested.length) return notAssessed(ticket);
 
@@ -29,8 +52,7 @@ export async function normalizeAssessment({ raw, ticket, repoDir, options, valid
     const checked = await validateEvidence(candidates, repoDir, options);
     // An AC assertion needs a precise, openable line, not merely a plausible filename.
     const evidence = checked.evidence.filter((ev) => ev.lines);
-    const status = STATUSES.has(claimed) && (claimed === 'unknown' || evidence.length)
-      ? claimed : 'unknown';
+    const status = decide(claimed, evidence.length > 0, coverage);
     criteria.push({
       id,
       text: requested[index],
