@@ -1,0 +1,132 @@
+{
+  "code": [
+    {
+      "exclusions": [
+        "**/*.test.ts"
+      ],
+      "repository_id": "repo-fns",
+      "requested_ref": "main",
+      "resolved_sha": "9f2c1b7a4e6d8039a5b1c2d3e4f5061728394a5b",
+      "revision_state": "resolved",
+      "scope": [
+        "src/"
+      ]
+    }
+  ],
+  "documents": [
+    {
+      "availability": "available",
+      "blob_ref": "sha256:b5be529f7eeedca551ecf36e5481743ae53c3eb18f562fbc3e2ca369d6e5bda4",
+      "content_sha256": "sha256:b5be529f7eeedca551ecf36e5481743ae53c3eb18f562fbc3e2ca369d6e5bda4",
+      "document_id": "design/BD-login.md",
+      "linked_issue_keys": [
+        "FNS-1"
+      ],
+      "source_id": "docsrc-onedrive",
+      "version": "3"
+    }
+  ],
+  "input_issues": [],
+  "manifest": {
+    "authority": "jira",
+    "bundle_id": "bnd_fixture05",
+    "canonical_form": "cjson/1",
+    "capture_state": "sealed",
+    "captured_at": "2026-09-21T00:00:00+00:00",
+    "import_capture_id": "cap_fixture01",
+    "input_hash": "sha256:c9860941e6555f700b059d1c260e0e7dd79a0b8a5d8f1ac0ad5c18c1ffbe04cf",
+    "jira_project_key": "FNS",
+    "provenance_grade": "captured",
+    "schema_version": 1,
+    "snapshot_id": "src-fns_s1",
+    "source_id": "src-fns",
+    "tenant_id": "tenant-a",
+    "workflow_policy_version": "1"
+  },
+  "requirements": [
+    {
+      "criteria": [
+        {
+          "ambiguous": false,
+          "complete": true,
+          "criterion_id": "crit_a4608148717d0ddaf1f2bf4bd424ba52",
+          "exact_text": "Tài khoản bị khóa sau 10 lần đăng nhập sai.",
+          "identity_text": "Tài khoản bị khóa sau 10 lần đăng nhập sai.",
+          "mandatory": true,
+          "source_field": "customfield_10101",
+          "source_locator": "customfield_10101[0]",
+          "statement_hash": "sha256:ceaa47645c9bbcfb63b9e6069052f199b5298e87a86b817aa3c1eb7fe7262e40",
+          "upstream_id": ""
+        },
+        {
+          "ambiguous": false,
+          "complete": true,
+          "criterion_id": "crit_5df7e60209185129b7c07c5085f6800a",
+          "exact_text": "Người dùng đặt lại mật khẩu qua email.",
+          "identity_text": "Người dùng đặt lại mật khẩu qua email.",
+          "mandatory": true,
+          "source_field": "customfield_10101",
+          "source_locator": "customfield_10101[1]",
+          "statement_hash": "sha256:63c1f6ae4c9142f8ddae78828916d863c71298d4ac3a99a6073100665557db9f",
+          "upstream_id": ""
+        }
+      ],
+      "description": "Bảo vệ tài khoản khỏi dò mật khẩu.",
+      "field_provenance": [
+        {
+          "complete": true,
+          "field": "summary",
+          "format": "text",
+          "role": "summary",
+          "source": "jira"
+        },
+        {
+          "complete": true,
+          "field": "description",
+          "format": "text",
+          "role": "description",
+          "source": "jira"
+        },
+        {
+          "complete": true,
+          "field": "customfield_10101",
+          "format": "text",
+          "role": "acceptance_criteria",
+          "source": "jira"
+        }
+      ],
+      "identity_basis": "issue_id",
+      "issue_id": "10001",
+      "issue_key": "FNS-1",
+      "jira_updated_at": "2026-09-20T10:00:00.000+0700",
+      "project_key": "FNS",
+      "requirement_hash": "sha256:42541a7360c92f2b1d48dc693364fc4bd4f02e386633c78dff19e42135d151a4",
+      "status": {
+        "normalized": "done",
+        "observed_at": "2026-09-21T00:00:00+00:00",
+        "raw_category": "done",
+        "raw_id": "10002",
+        "raw_name": "Done",
+        "raw_resolution": "Fixed",
+        "status_hash": "sha256:6363296c8547b3ee16fc47de3e313408ea86dd1520f3cf5b6a8a1da2431ca542"
+      },
+      "summary": "Khóa tài khoản sau nhiều lần đăng nhập sai"
+    }
+  ],
+  "workflow_policy": {
+    "claimed_complete": [
+      "done"
+    ],
+    "completion_gates": [],
+    "excluded_resolutions": [
+      "won't do",
+      "wont do",
+      "duplicate"
+    ],
+    "excluded_statuses": [
+      "cancelled"
+    ],
+    "policy_hash": "sha256:22a432e2013352ff9efd2c8a9fdcd78b92afafbc9ceb91d37fcab543dbfae3f0",
+    "version": "1"
+  }
+}
