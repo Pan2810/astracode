@@ -214,12 +214,11 @@ test('structured tickets run through the server with distinct keys and AC', asyn
   assert.match(done.result.source_revision, /^[a-f0-9]{40}$/);
 });
 
-test('structured tickets reject ambiguous or malformed input before cloning', async () => {
+test('structured tickets reject malformed input before cloning', async () => {
   const common = { repo_url: 'https://example.invalid/repo.git', tickets_schema_version: 1 };
   const ticket = { key: 'A-1', summary: 'Create order', description: 'details', acceptance_criteria: ['Returns 201'] };
-  assert.equal((await post({ ...common, tickets: [ticket], tickets_md: '## A-1' })).status, 400);
   assert.equal((await post({ ...common, tickets: [ticket, ticket] })).status, 400);
-  assert.equal((await post({ ...common, tickets: [{ ...ticket, acceptance_criteria: 'Returns 201' }] })).status, 400);
+  assert.equal((await post({ ...common, tickets: [{ ...ticket, key: '' }] })).status, 400);
 });
 
 test('thiếu/sai token → 401', async () => {

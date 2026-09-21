@@ -30,7 +30,7 @@ import { createAdminRoutes } from './lib/admin.mjs';
 import { createDailyLog } from './lib/daily.mjs';
 import { bearerOf, createAdminAuth, sameSecret } from './lib/adminAuth.mjs';
 import { TIGHTEN_MODE } from './lib/candidates.mjs';
-import { parseTicketsInput } from './lib/tickets.mjs';
+import { parseJsonTickets, parseSchemaVersion, resolveTickets } from './lib/tickets.mjs';
 import { admitJob } from './lib/jobs.mjs';
 
 const MAX_BODY_BYTES = 8 * 1024 * 1024;
@@ -297,6 +297,10 @@ export function createServer(config, { log = console.log, persist = true } = {})
         // Hai đường gọi dừng, khai riêng vì bên gọi cần biết có hay không mới
         // dựng được nút "huỷ" mà không phải POST thử rồi đọc 404.
         cancel_routes: ['DELETE /api/v1/analyze/{job_id}', 'DELETE /api/v1/judge/{job_id}'],
+        // `POST /api/v1/analyze` nhận `tickets: [{key, summary, status, description}]`
+        // song song với `tickets_md`. Bên gọi dò bằng đây thay vì thử rồi đoán
+        // theo mã lỗi — một server bản cũ sẽ không có field này.
+        accepts_json_tickets: true,
         // Ðếm nội bộ từ lúc khởi động — KHÔNG hỏi nhà cung cấp, nên đây không
         // phải hạn mức còn lại. Lượt thử lại cũng tính, vì nó cũng là request thật.
         model_calls_this_session: usage.model_calls,
@@ -336,15 +340,38 @@ export function createServer(config, { log = console.log, persist = true } = {})
 
       const missing = [];
       if (typeof body.repo_url !== 'string' || !body.repo_url.trim()) missing.push('repo_url');
-      if (!Object.hasOwn(body, 'tickets') && (typeof body.tickets_md !== 'string' || !body.tickets_md.trim())) {
-        missing.push('tickets or tickets_md');
+      // Một trong hai là đủ: `tickets` (JSON, đã có cấu trúc) hoặc `tickets_md`.
+      const hasJson = body.tickets !== undefined && body.tickets !== null;
+      if (!hasJson && (typeof body.tickets_md !== 'string' || !body.tickets_md.trim())) {
+        missing.push('tickets_md hoặc tickets');
       }
       if (missing.length) {
         return sendJson(res, 400, { error: `thiếu field bắt buộc: ${missing.join(', ')}` });
       }
-      if (Object.hasOwn(body, 'tickets')) {
+
+      /*
+       * `tickets` (JSON) kiểm ngay ở đây, `tickets_md` thì không — và sự khác
+       * nhau ấy là có chủ ý. Một mảng JSON sai kiểu là sai ở phía người gửi,
+       * sửa trong mười giây khi có 400 kèm chỉ số phần tử. Còn `tickets_md`
+       * hỏng là một phép DÒ không ra, và hợp đồng cũ đã nói nó thành job
+       * `failed` kèm message — đổi nó ở đây là đổi hành vi bên dưới chân một
+       * client đang chạy.
+       */
+      /*
+       * Phiên bản schema đi kèm bộ ticket. Thiếu thì là 1 (client bản cũ không
+       * gửi field này, và bộ ticket của nó đúng là v1). Khác 1 thì DỪNG kèm con
+       * số nhận được: đọc một schema chưa biết bằng luật của v1 là cách để một
+       * field đổi nghĩa lặng lẽ đi thẳng vào prompt.
+       */
+      try {
+        parseSchemaVersion(body.tickets_schema_version);
+      } catch (err) {
+        return sendJson(res, 400, { error: err instanceof Error ? err.message : String(err) });
+      }
+
+      if (hasJson) {
         try {
-          parseTicketsInput(body);
+          parseJsonTickets(body.tickets);
         } catch (err) {
           return sendJson(res, 400, { error: err instanceof Error ? err.message : String(err) });
         }
@@ -403,15 +430,18 @@ export function createServer(config, { log = console.log, persist = true } = {})
         // Đếm ticket ngay tại đây chỉ để cho vào dòng log — job vẫn tự tách lại và
         // tự báo lỗi nếu `tickets_md` hỏng. Ở đây hỏng thì ghi `?`, không ném.
         let ticketCount = '?';
+        let ticketSource = hasJson ? 'json' : 'markdown';
         try {
-          ticketCount = String(parseTicketsInput(body).length);
+          const resolved = resolveTickets(body);
+          ticketCount = String(resolved.tickets.length);
+          ticketSource = resolved.source;
         } catch {
-          ticketCount = '? (tickets_md chưa dò được)';
+          ticketCount = hasJson ? '? (tickets JSON chưa đọc được)' : '? (tickets_md chưa dò được)';
         }
 
         runLog.line(
           `POST /api/v1/analyze ← ${clientIp(req)} | run_id ${job.run_id ?? '(không có)'} | job ${job.id} | ` +
-            `repo ${body.repo_url} | ref ${body.ref || '(mặc định)'} | ticket ${ticketCount} | ` +
+            `repo ${body.repo_url} | ref ${body.ref || '(mặc định)'} | ticket ${ticketCount} (${ticketSource}) | ` +
             `backend ${['cli', 'fci', 'none'].includes(body.backend) ? `${body.backend} (ép theo request)` : config.judgeBackend}` +
             (Array.isArray(body.tickets_subset) ? ` | subset ${body.tickets_subset.length} key` : '') +
             (body.base_revision ? ` | base ${body.base_revision}` : ''),

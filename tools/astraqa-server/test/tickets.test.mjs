@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { parseTickets, parseTicketsInput } from '../lib/tickets.mjs';
+import { parseTickets, parseJsonTickets, resolveTickets } from '../lib/tickets.mjs';
 import { buildPrompt } from '../lib/prompt.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -82,28 +82,26 @@ test('ticket headings outrank repeated description and acceptance headings', () 
 
 test('structured tickets preserve distinct descriptions and AC without truncation', () => {
   const longDescription = 'Detail '.repeat(700);
-  const tickets = parseTicketsInput({
-    tickets_schema_version: 1,
-    tickets: [
-      { key: 'A-1', summary: 'Create order', status: 'done', description: longDescription,
-        acceptance_criteria: ['Returns 201', 'Writes exactly one order'] },
-      { key: 'B-1', summary: 'Reject invalid order', status: 'in_progress',
-        description: 'Reject empty customer ID', acceptance_criteria: ['Returns 400'] },
-    ],
-  });
+  const tickets = parseJsonTickets([
+    { key: 'A-1', summary: 'Create order', status: 'done', description: longDescription,
+      acceptance_criteria: ['Returns 201', 'Writes exactly one order'] },
+    { key: 'B-1', summary: 'Reject invalid order', status: 'in_progress',
+      description: 'Reject empty customer ID', acceptance_criteria: ['Returns 400'] },
+  ]);
   assert.deepEqual(tickets.map((ticket) => ticket.key), ['A-1', 'B-1']);
-  assert.equal(tickets[0].description, longDescription);
+  assert.equal(tickets[0].body, longDescription.trim());
+  assert.equal(tickets[0].truncated, false);
   assert.deepEqual(tickets[0].acceptance_criteria, ['Returns 201', 'Writes exactly one order']);
-  assert.match(tickets[0].body, /Writes exactly one order/);
   const prompt = buildPrompt({ ticket: tickets[0] });
-  assert.ok(prompt.includes(longDescription));
+  assert.ok(prompt.includes(longDescription.trim()));
   assert.match(prompt, /1\. Returns 201/);
   assert.match(prompt, /2\. Writes exactly one order/);
 });
 
 test('structured tickets reject ambiguous and lossy inputs', () => {
   const ticket = { key: 'A-1', description: 'Details', acceptance_criteria: ['Passes'] };
-  assert.throws(() => parseTicketsInput({ tickets_schema_version: 1, tickets: [ticket], tickets_md: '## A-1' }), /either/);
-  assert.throws(() => parseTicketsInput({ tickets_schema_version: 1, tickets: [ticket, ticket] }), /duplicate key/);
-  assert.throws(() => parseTicketsInput({ tickets_schema_version: 1, tickets: [{ ...ticket, acceptance_criteria: 'Passes' }] }), /array of strings/);
+  assert.throws(() => parseJsonTickets([ticket, ticket]), /key bị trùng/);
+  assert.throws(() => parseJsonTickets([{ ...ticket, key: '' }]), /key phải là chuỗi không rỗng/);
+  // `tickets` thắng `tickets_md` khi có cả hai — không có phép "gộp".
+  assert.deepEqual(resolveTickets({ tickets: [ticket], tickets_md: '## A-1' }).source, 'json');
 });

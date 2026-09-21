@@ -24,7 +24,92 @@ const STATUS_LABELS = ['status', 'state', 'jira status', 'trạng thái', 'trang
 /** Ký tự ngăn giữa key và tiêu đề trong một dòng: `KEY — tiêu đề`, `KEY: tiêu đề`, `KEY | tiêu đề`. */
 const SEPARATORS = ['—', '–', '·', '|', ' - ', ' -- ', ':'];
 
-const MAX_BODY_CHARS = 4000;
+/**
+ * Trần chữ cho mô tả ticket.
+ *
+ * 4000 là ngưỡng của bản đầu, đặt khi mô tả còn đi qua markdown và thứ dài nhất
+ * là một đoạn văn. Với `tickets` JSON thì `description` là nguyên văn mô tả
+ * Jira — có ticket mang cả bảng, cả log, cả vài nghìn chữ — và cắt ở 4000 là
+ * cắt mất đúng phần nói rõ ticket đòi gì. 12000 đủ cho gần hết những mô tả thật
+ * đã đo, mà vẫn là một trần: không có trần thì một ticket đủ sức làm nổ prompt
+ * của cả job.
+ *
+ * Cắt thì PHẢI NÓI RA (`truncated: true` trên item, một dòng trong `report_md`).
+ * Cắt im lặng nghĩa là model kết luận trên một nửa đề bài và không ai biết.
+ */
+export const MAX_BODY_CHARS = 12_000;
+
+/** Trần số tiêu chí chấp nhận — bằng đúng `max_length=200` của schema AstraQA. */
+export const MAX_ACCEPTANCE_CRITERIA = 200;
+
+/** Phiên bản schema ticket mà bản server này đọc được. */
+export const TICKETS_SCHEMA_VERSION = 1;
+
+/**
+ * Cắt mô tả, và nói rõ là đã cắt.
+ *
+ * @returns {{body: string, truncated: boolean}}
+ */
+function clipBody(raw) {
+  const s = String(raw ?? '').trim();
+  if (s.length <= MAX_BODY_CHARS) return { body: s, truncated: false };
+  return {
+    body: `${s.slice(0, MAX_BODY_CHARS)}\n…(đã cắt ${s.length - MAX_BODY_CHARS} ký tự)`,
+    truncated: true,
+  };
+}
+
+/**
+ * `tickets_schema_version` — phiên bản của chính bộ ticket gửi lên.
+ *
+ * Thiếu thì coi là 1: client bản cũ không gửi field này, và bộ ticket của nó
+ * đúng là v1. Khác 1 thì DỪNG kèm con số nhận được — đoán bừa một schema chưa
+ * biết là cách để một field đổi nghĩa lặng lẽ đi thẳng vào prompt.
+ */
+export function parseSchemaVersion(raw) {
+  if (raw === undefined || raw === null) return TICKETS_SCHEMA_VERSION;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n !== TICKETS_SCHEMA_VERSION) {
+    throw new Error(
+      `tickets_schema_version: bản server này chỉ đọc được schema ${TICKETS_SCHEMA_VERSION}, ` +
+        `nhận được ${JSON.stringify(raw)}.`,
+    );
+  }
+  return n;
+}
+
+/**
+ * `acceptance_criteria: string[]` — mỗi tiêu chí một phần tử, và đó là cả ý nghĩa.
+ *
+ * Một khối chữ gộp thì đọc được nhưng không kiểm được: "code thoả mấy trong năm
+ * tiêu chí" là câu hỏi cần năm thứ. Danh sách vào prompt thành năm dòng đánh số,
+ * và số ấy chính là `id` trong `assessment` trả về — nên thứ tự ở đây là hợp
+ * đồng, không phải trình bày.
+ *
+ * `acceptance_hint` là đường lui cho bên gọi chỉ có một chuỗi. AstraQA dựng nó
+ * bằng `"\n".join(criteria)`, nên tách lại theo dòng là khôi phục đúng danh
+ * sách cũ; một hint một dòng thì thành một tiêu chí.
+ */
+export function parseAcceptance(ticket = {}) {
+  let list = [];
+  const raw = ticket.acceptance_criteria;
+  if (Array.isArray(raw)) {
+    list = raw.map((v) => String(v ?? '').trim());
+  } else if (raw !== undefined && raw !== null && String(raw).trim()) {
+    list = [String(raw).trim()];
+  } else {
+    list = String(ticket.acceptance_hint ?? '')
+      .split(/\r?\n/)
+      .map((v) => v.trim());
+  }
+  list = list.filter(Boolean);
+  if (list.length > MAX_ACCEPTANCE_CRITERIA) {
+    throw new Error(
+      `acceptance_criteria có ${list.length} tiêu chí, trần là ${MAX_ACCEPTANCE_CRITERIA}.`,
+    );
+  }
+  return list;
+}
 
 function norm(s) {
   return String(s).normalize('NFC').trim().toLowerCase().replace(/\s+/g, ' ');
@@ -87,17 +172,31 @@ function fieldsOf(lines) {
   return out;
 }
 
-/** `KEY — tiêu đề` → {key, title}. Không có dấu ngăn thì token đầu là key. */
+/**
+ * `KEY — tiêu đề` → {key, title}. Không có dấu ngăn thì token đầu là key.
+ *
+ * Dấu ngăn được chọn theo VỊ TRÍ SỚM NHẤT trong chuỗi, không theo thứ tự ưu
+ * tiên của danh sách. Chọn theo danh sách thì `WEB-5: Có dấu | và hai chấm` bị
+ * cắt ở `|` (vì `|` đứng trước `:` trong `SEPARATORS`) và key thành
+ * `"WEB-5: Có dấu"` — một key rác, lặng lẽ, trên một ticket trông vẫn bình
+ * thường. Một tiêu đề có `|` là chuyện thường; đứng sau dấu ngăn thật thì nó
+ * phải nằm trong tiêu đề.
+ *
+ * Hoà vị trí thì thứ tự trong `SEPARATORS` quyết định — dấu dài hơn (` -- `)
+ * khai ở trước dấu ngắn hơn.
+ */
 function splitLead(text) {
   const t = clean(text);
   if (!t) return { key: '', title: '' };
+  let best = null;
   for (const sep of SEPARATORS) {
     const i = t.indexOf(sep);
-    if (i > 0) {
-      const key = clean(t.slice(0, i));
-      const title = clean(t.slice(i + sep.length));
-      if (key) return { key, title };
-    }
+    if (i > 0 && (best === null || i < best.i)) best = { i, sep };
+  }
+  if (best) {
+    const key = clean(t.slice(0, best.i));
+    const title = clean(t.slice(best.i + best.sep.length));
+    if (key) return { key, title };
   }
   const parts = t.split(/\s+/);
   if (parts.length === 1) return { key: clean(parts[0]), title: '' };
@@ -143,6 +242,10 @@ function fromTable(lines, fenced) {
         title: titleCol >= 0 ? clean(cells[titleCol] ?? '') : '',
         status: statusCol >= 0 ? clean(cells[statusCol] ?? '') : '',
         body,
+        // Dòng 1-based trong `tickets_md`. Chỉ dùng cho thông báo lỗi, nhưng
+        // một lỗi "key trùng" không kèm số dòng thì người sửa phải tự đi tìm
+        // trong một tệp 190 ticket.
+        line: r + 1,
       });
     }
     if (tickets.length) return tickets;
@@ -193,6 +296,7 @@ function fromHeadings(lines, fenced) {
       title: fields.title ?? lead.title,
       status: fields.status ?? '',
       body: bodyLines.join('\n').trim(),
+      line: start + 1,
     });
   }
   return tickets;
@@ -220,6 +324,7 @@ function fromList(lines, fenced) {
       title: fields.title ?? lead.title,
       status: fields.status ?? '',
       body: sub.join('\n').trim(),
+      line: i + 1,
     });
   }
   return tickets;
@@ -242,68 +347,134 @@ export function parseTickets(md) {
   if (!tickets.length) tickets = fromList(lines, fenced);
 
   if (!tickets.length) {
+    // Chỉ ra dòng đầu tiên có chữ: gần như luôn là chỗ người gửi tưởng mình
+    // đang khai một ticket. "Không dò ra ticket nào" mà không kèm một mẩu văn
+    // bản thật thì người sửa không biết server đã đọc tới đâu.
+    const firstIdx = lines.findIndex((l) => l.trim());
+    const where =
+      firstIdx >= 0
+        ? ` Ðọc từ dòng ${firstIdx + 1}: "${lines[firstIdx].trim().slice(0, 60)}".`
+        : '';
     throw new Error(
-      'tickets_md: không dò ra ticket nào. Hỗ trợ ba cấu trúc: bảng markdown có cột key/id/ticket, ' +
+      `tickets_md: không dò ra ticket nào.${where} Hỗ trợ ba cấu trúc: bảng markdown có cột key/id/ticket, ` +
         'heading (mỗi heading một ticket), hoặc danh sách gạch đầu dòng. Trong cả ba, một dòng ' +
         '"Key: …" trong thân ticket luôn được ưu tiên.',
     );
   }
 
+  /*
+   * Key trùng vẫn là lỗi — nhưng lỗi phải chỉ được chỗ.
+   *
+   * Hai ticket đụng nhau sau khi chuẩn hoá (`norm` bỏ hoa/thường và khoảng
+   * trắng thừa), nên hai key GỐC có thể trông khác nhau: `WEB-1001` và
+   * `web-1001` là cùng một key với server mà là hai dòng khác nhau với mắt
+   * người. Thông báo vì thế phải nói cả hai chữ gốc lẫn hai số dòng — không có
+   * chúng thì người sửa cầm một tệp 190 ticket và một câu "có key trùng".
+   */
   const seen = new Map();
   for (const t of tickets) {
-    t.body = t.body.length > MAX_BODY_CHARS ? `${t.body.slice(0, MAX_BODY_CHARS)}\n…(đã cắt)` : t.body;
+    const clipped = clipBody(t.body);
+    t.body = clipped.body;
+    t.truncated = clipped.truncated;
+    // Markdown không có chỗ nào để khai tiêu chí chấp nhận thành danh sách —
+    // đó là một trong những lý do `tickets` JSON tồn tại.
+    t.acceptance_criteria = [];
     const k = norm(t.key);
-    seen.set(k, (seen.get(k) ?? 0) + 1);
+    if (!seen.has(k)) seen.set(k, []);
+    seen.get(k).push(t);
   }
-  const dup = [...seen].filter(([, n]) => n > 1).map(([k]) => k);
-  if (dup.length) {
-    throw new Error(`tickets_md: key bị trùng (${dup.join(', ')}). Mỗi ticket phải có key riêng.`);
+  const clashes = [...seen].filter(([, group]) => group.length > 1);
+  if (clashes.length) {
+    const where = (t) => `"${t.key}" (dòng ${t.line ?? '?'})`;
+    const detail = clashes
+      .map(([k, group]) => {
+        const shown = group.slice(0, 2).map(where).join(' và ');
+        const more = group.length > 2 ? `, và ${group.length - 2} chỗ nữa` : '';
+        return `${shown}${more} cùng là key "${k}"`;
+      })
+      .join('; ');
+    throw new Error(`tickets_md: key bị trùng — ${detail}. Mỗi ticket phải có key riêng.`);
   }
 
   return tickets;
 }
 
-/** Structured transport used by AstraQA; Markdown remains for existing callers. */
-export function parseTicketsInput(body) {
-  const hasTickets = Object.hasOwn(body ?? {}, 'tickets');
-  const hasMarkdown = typeof body?.tickets_md === 'string' && Boolean(body.tickets_md.trim());
-  if (!hasTickets) return parseTickets(body?.tickets_md);
-  if (hasMarkdown) throw new Error('Send either tickets or tickets_md, not both.');
-  if (body.tickets_schema_version !== 1) throw new Error('tickets_schema_version must be 1.');
-  if (!Array.isArray(body.tickets) || body.tickets.length === 0) {
-    throw new Error('tickets must be a non-empty array.');
-  }
-  const seen = new Set();
-  return body.tickets.map((raw, index) => {
-    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
-      throw new Error(`tickets[${index}] must be an object.`);
+/**
+ * `tickets: [{key, summary, status, description}]` — danh sách đã có cấu trúc.
+ *
+ * Ðường này tồn tại vì `tickets_md` là một phép ĐOÁN. AstraQA vốn đã có từng
+ * trường tách bạch trong hệ của nó; ép chúng thành markdown rồi bắt server dò
+ * ngược lại là thêm một chỗ để hỏng — và nó hỏng đúng ở những tiêu đề chứa
+ * `|`, `#`, `(`, hay xuống dòng, tức là những tiêu đề viết bình thường.
+ *
+ * Ở đây không có phép dò nào: key là key, summary là summary. `description` vào
+ * `body` — đúng hai trường mà `queryTerms` được phép đọc (§1.1).
+ *
+ * Trùng key vẫn là lỗi, cùng một lý do như bên markdown, chỉ khác là chỉ được
+ * chỗ bằng chỉ số mảng thay vì số dòng.
+ *
+ * @returns {{key: string, title: string, status: string, body: string, index: number}[]}
+ */
+export function parseJsonTickets(raw) {
+  if (!Array.isArray(raw)) throw new Error('"tickets" phải là một mảng.');
+  if (raw.length === 0) throw new Error('"tickets" là mảng rỗng — không có ticket nào để đối chiếu.');
+
+  const tickets = raw.map((t, i) => {
+    if (!t || typeof t !== 'object' || Array.isArray(t)) {
+      throw new Error(`tickets[${i}] phải là một object {key, summary, status, description}.`);
     }
-    const key = typeof raw.key === 'string' ? raw.key.trim() : '';
-    if (!key) throw new Error(`tickets[${index}].key must be a non-empty string.`);
-    const normalized = norm(key);
-    if (seen.has(normalized)) throw new Error(`tickets: duplicate key ${key}.`);
-    seen.add(normalized);
-    const title = raw.summary ?? raw.title ?? '';
-    const status = raw.status ?? '';
-    const description = raw.description ?? '';
-    const acceptance = raw.acceptance_criteria ?? [];
-    if (typeof title !== 'string' || typeof status !== 'string' || typeof description !== 'string') {
-      throw new Error(`tickets[${index}] summary, status and description must be strings.`);
+    const key = String(t.key ?? '').trim();
+    if (!key) throw new Error(`tickets[${i}].key phải là chuỗi không rỗng.`);
+    const { body, truncated } = clipBody(t.description);
+    let acceptance;
+    try {
+      acceptance = parseAcceptance(t);
+    } catch (err) {
+      throw new Error(`tickets[${i}]: ${err instanceof Error ? err.message : String(err)}`);
     }
-    if (!Array.isArray(acceptance) || acceptance.some((criterion) => typeof criterion !== 'string')) {
-      throw new Error(`tickets[${index}].acceptance_criteria must be an array of strings.`);
-    }
-    const bodyText = [
-      description,
-      acceptance.length ? `Acceptance criteria:\n${acceptance.map((criterion, i) => `${i + 1}. ${criterion}`).join('\n')}` : '',
-    ].filter(Boolean).join('\n\n');
     return {
       key,
-      title,
-      status,
-      description,
-      acceptance_criteria: [...acceptance],
-      body: bodyText,
+      title: String(t.summary ?? '').trim(),
+      status: String(t.status ?? '').trim(),
+      body,
+      // Mô tả đã bị cắt hay chưa — đi theo tận item trả về cho AstraQA.
+      truncated,
+      acceptance_criteria: acceptance,
+      index: i,
     };
   });
+
+  const seen = new Map();
+  for (const t of tickets) {
+    const k = norm(t.key);
+    if (!seen.has(k)) seen.set(k, []);
+    seen.get(k).push(t);
+  }
+  const clashes = [...seen].filter(([, group]) => group.length > 1);
+  if (clashes.length) {
+    const where = (t) => `"${t.key}" (tickets[${t.index}])`;
+    const detail = clashes
+      .map(([k, group]) => `${group.slice(0, 2).map(where).join(' và ')} cùng là key "${k}"`)
+      .join('; ');
+    throw new Error(`tickets: key bị trùng — ${detail}. Mỗi ticket phải có key riêng.`);
+  }
+
+  return tickets;
+}
+
+/**
+ * Chọn nguồn ticket của một job: JSON thắng markdown khi có cả hai.
+ *
+ * "Thắng" chứ không phải "gộp": gộp hai nguồn nghĩa là phải quyết xem bản nào
+ * đúng khi chúng nói khác nhau về cùng một key, và không có câu trả lời đúng
+ * cho việc ấy. JSON thắng vì nó là dữ liệu đã có cấu trúc — `tickets_md` chỉ là
+ * cùng dữ liệu đó sau khi đã bị ép qua markdown.
+ *
+ * @returns {{tickets: object[], source: 'json'|'markdown'}}
+ */
+export function resolveTickets(body = {}) {
+  if (body.tickets !== undefined && body.tickets !== null) {
+    return { tickets: parseJsonTickets(body.tickets), source: 'json' };
+  }
+  return { tickets: parseTickets(body.tickets_md), source: 'markdown' };
 }

@@ -16,7 +16,7 @@ import {
   requirementHash,
   statementHash,
 } from '../lib/consistency.mjs';
-import { parseTicketsInput } from '../lib/tickets.mjs';
+import { parseJsonTickets } from '../lib/tickets.mjs';
 import { normalizeAssessment, notAssessed } from '../lib/assessment.mjs';
 import { keepRealEvidence } from '../lib/analyze.mjs';
 
@@ -126,7 +126,7 @@ test('payload semantic đi ra với status rỗng, và wire v1 vẫn nhận nguy
   assert.ok(tickets[0].acceptance_criteria.every((c) => typeof c === 'string'));
 
   // Và cái parser đang chạy hôm nay nhận nó, không đổi một dòng nào của tickets.mjs.
-  const parsed = parseTicketsInput({ tickets_schema_version: 1, tickets });
+  const parsed = parseJsonTickets(tickets);
   assert.equal(parsed.length, 1);
   assert.equal(parsed[0].key, 'FNS-1');
   assert.deepEqual(parsed[0].acceptance_criteria, tickets[0].acceptance_criteria);
@@ -143,7 +143,7 @@ test('trả lời theo index được gắn đúng tiêu chí, và dòng lạc t
       { id: 2, status: 'unknown', evidence: [] },
       { id: 7, status: 'satisfied', evidence: [] },
     ],
-    ticket: parseTicketsInput({ tickets_schema_version: 1, tickets })[0],
+    ticket: parseJsonTickets(tickets)[0],
     repoDir: FIXTURE_DIR,
     options,
     validateEvidence: keepRealEvidence,
