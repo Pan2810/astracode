@@ -31,6 +31,7 @@ import { createDailyLog } from './lib/daily.mjs';
 import { bearerOf, createAdminAuth, sameSecret } from './lib/adminAuth.mjs';
 import { TIGHTEN_MODE } from './lib/candidates.mjs';
 import { parseTicketsInput } from './lib/tickets.mjs';
+import { admitJob } from './lib/jobs.mjs';
 
 const MAX_BODY_BYTES = 8 * 1024 * 1024;
 const MAX_JOBS_KEPT = 200;
@@ -167,6 +168,9 @@ export function createServer(config, { log = console.log, persist = true } = {})
   // lại, chỉ là "phiên này đã bắn bao nhiêu viên".
   const usage = { model_calls: 0, jobs: 0 };
 
+  /** Chính sách nhận/đẩy job nằm ở lib/jobs.mjs — xem lý do ở đầu file đó. */
+  const admit = (job) => admitJob(jobs, job, MAX_JOBS_KEPT);
+
   const adminAuth = createAdminAuth({ serviceToken: config.serviceToken, devMode });
 
   // Trang theo dõi chỉ đọc. Toàn bộ logic nằm ở lib/admin.mjs; ở đây chỉ nối dây.
@@ -243,11 +247,13 @@ export function createServer(config, { log = console.log, persist = true } = {})
     usage.jobs += 1;
     runAnalyzeJob({ job, body, config, redact, log: (m) => runLog.line(m), limiter, usage })
       .then((result) => {
-        job.status = 'succeeded';
+        // Cùng luật với job judge: đã bị gọi dừng thì kết thúc là `cancelled`.
+        // Nói "xong" sẽ khiến bên gọi tưởng cả bảng đã được xét.
+        job.status = job.abort?.signal?.aborted ? 'cancelled' : 'succeeded';
         job.result = result;
         const s = result.stats ?? {};
         runLog.line(
-          `job xong: succeeded | ${result.items.length} ticket | ` +
+          `job xong: ${job.status} | ${result.items.length} ticket | ` +
             `done ${result.items.filter((i) => i.code_status === 'done').length}, ` +
             `partial ${result.items.filter((i) => i.code_status === 'partial').length}, ` +
             `missing ${result.items.filter((i) => i.code_status === 'missing').length} | ` +
@@ -267,7 +273,7 @@ export function createServer(config, { log = console.log, persist = true } = {})
       });
   }
 
-  const server = http.createServer(async (req, res) => {
+  async function handle(req, res) {
     const url = new URL(req.url ?? '/', 'http://localhost');
     const route = url.pathname.replace(/\/+$/, '') || '/';
 
@@ -288,6 +294,9 @@ export function createServer(config, { log = console.log, persist = true } = {})
         // Đường nào server này có. Bên gọi dò bằng đây thay vì POST thử rồi
         // đọc 404 — một 404 còn có thể là sai đường dẫn hay sai proxy.
         routes: ['/api/v1/analyze', '/api/v1/judge', '/api/v1/judge/cache'],
+        // Hai đường gọi dừng, khai riêng vì bên gọi cần biết có hay không mới
+        // dựng được nút "huỷ" mà không phải POST thử rồi đọc 404.
+        cancel_routes: ['DELETE /api/v1/analyze/{job_id}', 'DELETE /api/v1/judge/{job_id}'],
         // Ðếm nội bộ từ lúc khởi động — KHÔNG hỏi nhà cung cấp, nên đây không
         // phải hạn mức còn lại. Lượt thử lại cũng tính, vì nó cũng là request thật.
         model_calls_this_session: usage.model_calls,
@@ -367,39 +376,53 @@ export function createServer(config, { log = console.log, persist = true } = {})
         abort: new AbortController(),
         createdAt: Date.now(),
       };
-      jobs.set(job.id, job);
-      // Giữ bộ nhớ có trần: job cũ nhất rơi ra khi vượt ngưỡng.
-      while (jobs.size > MAX_JOBS_KEPT) jobs.delete(jobs.keys().next().value);
-
-      const runLog = createRunLog({
-        runsDir,
-        runId: job.run_id,
-        jobId: job.id,
-        redact: makeRedactor([config.serviceToken, config.astraworkJwt, config.fciApiKey, body.astrawork_token, body.repo_token]),
-        log,
-        enabled: persist,
-      });
-      job.runLog = runLog;
-
-      // Đếm ticket ngay tại đây chỉ để cho vào dòng log — job vẫn tự tách lại và
-      // tự báo lỗi nếu `tickets_md` hỏng. Ở đây hỏng thì ghi `?`, không ném.
-      let ticketCount = '?';
-      try {
-        ticketCount = String(parseTicketsInput(body).length);
-      } catch {
-        ticketCount = '? (tickets_md chưa dò được)';
+      if (!admit(job)) {
+        slog(`503 POST /api/v1/analyze ← ${clientIp(req)} | sổ ${MAX_JOBS_KEPT} job đã đầy, tất cả đang chạy`);
+        return sendJson(res, 503, {
+          error: `sổ job đã đầy (${MAX_JOBS_KEPT} job, tất cả đang chạy) — chờ một job xong rồi gửi lại.`,
+        });
       }
 
-      runLog.line(
-        `POST /api/v1/analyze ← ${clientIp(req)} | run_id ${job.run_id ?? '(không có)'} | job ${job.id} | ` +
-          `repo ${body.repo_url} | ref ${body.ref || '(mặc định)'} | ticket ${ticketCount} | ` +
-          `backend ${['cli', 'fci', 'none'].includes(body.backend) ? `${body.backend} (ép theo request)` : config.judgeBackend}` +
-          (Array.isArray(body.tickets_subset) ? ` | subset ${body.tickets_subset.length} key` : '') +
-          (body.base_revision ? ` | base ${body.base_revision}` : ''),
-      );
+      /*
+       * Từ đây tới `start()`, job ÐÃ chiếm một chỗ trong sổ nhưng chưa ai chạy
+       * nó. Ném ở giữa mà không bỏ nó ra thì cái chỗ ấy mất vĩnh viễn — sổ chỉ
+       * đẩy job đã đóng sổ, mà một job `queued` không bao giờ đóng sổ. Ðủ 200
+       * lần như thế là server chỉ còn biết trả 503.
+       */
+      try {
+        const runLog = createRunLog({
+          runsDir,
+          runId: job.run_id,
+          jobId: job.id,
+          redact: makeRedactor([config.serviceToken, config.astraworkJwt, config.fciApiKey, body.astrawork_token, body.repo_token]),
+          log,
+          enabled: persist,
+        });
+        job.runLog = runLog;
 
-      sendJson(res, 202, { job_id: job.id, status: 'queued' });
-      start(job, body, runLog);
+        // Đếm ticket ngay tại đây chỉ để cho vào dòng log — job vẫn tự tách lại và
+        // tự báo lỗi nếu `tickets_md` hỏng. Ở đây hỏng thì ghi `?`, không ném.
+        let ticketCount = '?';
+        try {
+          ticketCount = String(parseTicketsInput(body).length);
+        } catch {
+          ticketCount = '? (tickets_md chưa dò được)';
+        }
+
+        runLog.line(
+          `POST /api/v1/analyze ← ${clientIp(req)} | run_id ${job.run_id ?? '(không có)'} | job ${job.id} | ` +
+            `repo ${body.repo_url} | ref ${body.ref || '(mặc định)'} | ticket ${ticketCount} | ` +
+            `backend ${['cli', 'fci', 'none'].includes(body.backend) ? `${body.backend} (ép theo request)` : config.judgeBackend}` +
+            (Array.isArray(body.tickets_subset) ? ` | subset ${body.tickets_subset.length} key` : '') +
+            (body.base_revision ? ` | base ${body.base_revision}` : ''),
+        );
+
+        sendJson(res, 202, { job_id: job.id, status: 'queued' });
+        start(job, body, runLog);
+      } catch (err) {
+        jobs.delete(job.id);
+        throw err;
+      }
       return;
     }
 
@@ -454,30 +477,40 @@ export function createServer(config, { log = console.log, persist = true } = {})
         abort: new AbortController(),
         createdAt: Date.now(),
       };
-      jobs.set(job.id, job);
-      while (jobs.size > MAX_JOBS_KEPT) jobs.delete(jobs.keys().next().value);
+      if (!admit(job)) {
+        slog(`503 POST /api/v1/judge ← ${clientIp(req)} | sổ ${MAX_JOBS_KEPT} job đã đầy, tất cả đang chạy`);
+        return sendJson(res, 503, {
+          error: `sổ job đã đầy (${MAX_JOBS_KEPT} job, tất cả đang chạy) — chờ một job xong rồi gửi lại.`,
+        });
+      }
 
-      const runLog = createRunLog({
-        runsDir,
-        runId: body.run_id ? `${body.run_id}-judge` : null,
-        jobId: job.id,
-        redact: redactorFor(body),
-        log,
-        enabled: persist,
-      });
-      job.runLog = runLog;
+      // Cùng cửa sổ, cùng luật với route analyze ở trên.
+      try {
+        const runLog = createRunLog({
+          runsDir,
+          runId: body.run_id ? `${body.run_id}-judge` : null,
+          jobId: job.id,
+          redact: redactorFor(body),
+          log,
+          enabled: persist,
+        });
+        job.runLog = runLog;
 
-      runLog.line(
-        `POST /api/v1/judge ← ${clientIp(req)} | run_id ${job.run_id ?? '(không có)'} | job ${job.id} | ` +
-          `repo ${body.repo_url} | ref ${body.ref || '(mặc định)'} | ticket ${body.tickets.length} | ` +
-          `model ${config.fciModel || '(chưa cấu hình)'} | mode ${selection.mode}` +
-          (selection.skipAbove === null ? '' : ` skip_above ${selection.skipAbove}`) +
-          ` | cache ${selection.cache ? `bật (tenant ${safeTenant(selection.tenant)})` : 'tắt'}` +
-          (selection.rulesVersion ? ` | rules ${selection.rulesVersion}` : ''),
-      );
+        runLog.line(
+          `POST /api/v1/judge ← ${clientIp(req)} | run_id ${job.run_id ?? '(không có)'} | job ${job.id} | ` +
+            `repo ${body.repo_url} | ref ${body.ref || '(mặc định)'} | ticket ${body.tickets.length} | ` +
+            `model ${config.fciModel || '(chưa cấu hình)'} | mode ${selection.mode}` +
+            (selection.skipAbove === null ? '' : ` skip_above ${selection.skipAbove}`) +
+            ` | cache ${selection.cache ? `bật (tenant ${safeTenant(selection.tenant)})` : 'tắt'}` +
+            (selection.rulesVersion ? ` | rules ${selection.rulesVersion}` : ''),
+        );
 
-      sendJson(res, 202, { job_id: job.id, status: 'queued', total: body.tickets.length });
-      startJudge(job, body, runLog);
+        sendJson(res, 202, { job_id: job.id, status: 'queued', total: body.tickets.length });
+        startJudge(job, body, runLog);
+      } catch (err) {
+        jobs.delete(job.id);
+        throw err;
+      }
       return;
     }
 
@@ -557,11 +590,43 @@ export function createServer(config, { log = console.log, persist = true } = {})
     }
 
     const m = /^\/api\/v1\/analyze\/([^/]+)$/.exec(route);
+    if (m && req.method === 'DELETE') {
+      const job = jobs.get(decodeURIComponent(m[1]));
+      if (!job || job.kind === 'judge') return sendJson(res, 404, { error: 'job_id không tồn tại' });
+      /*
+       * Gọi dừng, không phải xoá — cùng nghĩa với `DELETE /api/v1/judge/:id`.
+       *
+       * Trước đây analyze có sẵn `AbortController` truyền xuống tận `runCli`
+       * và `askFci`, nhưng KHÔNG route nào gọi `.abort()`: một job 184 ticket
+       * bắn nhầm chỉ còn cách giết cả tiến trình. Những ticket đã chấm xong ở
+       * lại nguyên vẹn — chúng đã được trả tiền rồi; phần còn lại về với
+       * `reason: "cancelled"`, tức CHƯA XÉT.
+       */
+      job.abort?.abort();
+      if (job.status === 'queued' || job.status === 'running') job.status = 'cancelled';
+      job.runLog?.line(`DELETE /api/v1/analyze/${job.id} ← ${clientIp(req)} | dừng ở ${job.progress?.done ?? 0}/${job.progress?.total ?? '?'}`);
+      return sendJson(res, 200, {
+        status: job.status,
+        progress: job.progress,
+        ...(job.result ? { result: job.result } : {}),
+      });
+    }
+
     if (m && req.method === 'GET') {
       const job = jobs.get(decodeURIComponent(m[1]));
       if (!job || job.kind === 'judge') return sendJson(res, 404, { error: 'job_id không tồn tại' });
       if (job.status === 'succeeded') return sendJson(res, 200, { status: 'succeeded', result: job.result });
       if (job.status === 'failed') return sendJson(res, 200, { status: 'failed', error: job.error });
+      if (job.status === 'cancelled') {
+        // `result` chỉ có mặt khi job đã dọn xong. Giữa lúc dừng và lúc đóng
+        // sổ thì chưa có gì — và "đã dừng, đang dọn" khác "đã dừng, có kết
+        // quả", nên hai câu trả lời không được giống nhau.
+        return sendJson(res, 200, {
+          status: 'cancelled',
+          progress: job.progress,
+          ...(job.result ? { result: job.result } : {}),
+        });
+      }
       return sendJson(res, 200, {
         status: job.status,
         progress: job.progress,
@@ -570,6 +635,30 @@ export function createServer(config, { log = console.log, persist = true } = {})
     }
 
     return sendJson(res, 404, { error: 'not found' });
+  }
+
+  /*
+   * Bất biến: MỖI request nhận đúng một hồi âm.
+   *
+   * Handler trước đây là một `async` truyền thẳng cho `createServer`, nên một
+   * route ném là một promise bị bỏ rơi: client KHÔNG nhận gì cả và treo tới khi
+   * hết giờ, còn Node thì coi đó là unhandled rejection và mặc định giết cả
+   * tiến trình. Ðo được bằng cách cho `log` ném đúng ở dòng POST: client báo
+   * "KHÔNG CÓ HỒI ÂM (TimeoutError)", và job nằm lại sổ ở trạng thái `queued`.
+   *
+   * Hai lớp `try` bên trong là có chủ ý: chỗ hay ném nhất lại chính là sổ log,
+   * nên nó không được phép ngăn ta trả lời.
+   */
+  const server = http.createServer((req, res) => {
+    handle(req, res).catch((err) => {
+      try {
+        slog(`500 ${req.method} ${baseRedact(String(req.url ?? ''))} ← ${clientIp(req)} | ${redactMessage(err, baseRedact)}`);
+      } catch { /* sổ log hỏng thì vẫn phải trả lời */ }
+      try {
+        if (res.headersSent) res.destroy();
+        else sendJson(res, 500, { error: 'lỗi nội bộ của server' });
+      } catch { res.destroy(); }
+    });
   });
 
   server.on('listening', () => {
