@@ -35,8 +35,12 @@ const TOKEN = 'service-token-retry-test-0123456789';
 
 // ───────────────────────── withRetry ─────────────────────────
 
-test('chỉ 429 và 503 nằm trong danh sách thử lại', () => {
-  assert.deepEqual([...RETRY_STATUSES].sort(), [429, 503]);
+test('danh sách thử lại: hạn mức và lỗi gateway, KHÔNG có 4xx nào', () => {
+  // 429 hạn mức; 502/503/504/522/524 là "proxy không nói chuyện được với origin
+  // lúc này" — đúng loại lát nữa gọi lại thì được. Không có 4xx: một 400 được
+  // thử lại bốn lần là 15 giây mất trắng cho mỗi ticket của cả một đêm.
+  assert.deepEqual([...RETRY_STATUSES].sort((a, b) => a - b), [429, 502, 503, 504, 522, 524]);
+  assert.ok(![...RETRY_STATUSES].some((s) => s < 500 && s !== 429), 'không được nới sang 4xx');
   assert.deepEqual(BACKOFF_MS, [1000, 2000, 4000, 8000]);
 });
 
@@ -378,4 +382,125 @@ test('JSON xấu của model là lỗi của ticket đó, không nới parser', 
   assert.match(done.result.items[0].reason, /khối ```json|không trả về khối/i);
   assert.match(done.result.items[1].reason, /sai schema/);
   assert.equal(done.result.items[2].code_status, 'done');
+});
+
+/*
+ * Trần đồng thời dưới đúng hình dạng của `judge.mjs`.
+ *
+ * Ca ngay bên trên bắn cả 10 lượt trong MỘT nhịp rồi mỗi lượt chờ một
+ * `setTimeout` — mọi caller tới cùng lúc, nên nó không bao giờ chạm vào khe
+ * giữa "nhả chỗ" và "người xếp hàng nhận chỗ". Bản limiter cũ vẫn xanh ở đó
+ * trong khi đo được 5 lượt cùng lúc với `cap = 2`.
+ *
+ * Ca này dựng đúng cảnh thật: nhiều lane, mỗi lane `await limiter.run(...)`
+ * rồi lặp, và phần thân chỉ chờ microtask (giống một `fetch` đã có sẵn câu trả
+ * lời). Caller mới vì thế tới TỪ một microtask — đúng chỗ khe nằm.
+ */
+test('limiter giữ trần cả khi caller tới từ microtask (hình dạng lane của judge)', async () => {
+  for (const nhip of [1, 2, 3, 5]) {
+    const limiter = createLimiter(2);
+    let dangChay = 0;
+    let dinhNhat = 0;
+    const viec = async () => {
+      dangChay += 1;
+      dinhNhat = Math.max(dinhNhat, dangChay);
+      for (let i = 0; i < nhip; i++) await Promise.resolve();
+      dangChay -= 1;
+    };
+    const hangDoi = Array.from({ length: 40 }, (_, i) => i);
+    await Promise.all(
+      Array.from({ length: 8 }, async () => {
+        for (;;) {
+          if (!hangDoi.length) return;
+          hangDoi.shift();
+          await limiter.run(viec);
+        }
+      }),
+    );
+    assert.equal(dinhNhat, 2, `nhịp=${nhip}: đỉnh phải là 2, đo được ${dinhNhat}`);
+    assert.equal(limiter.active, 0, `nhịp=${nhip}: phải nhả hết chỗ`);
+    assert.equal(limiter.waiting, 0, `nhịp=${nhip}: không được bỏ quên ai trong hàng đợi`);
+  }
+});
+
+test('limiter trao chỗ theo đúng thứ tự đến', async () => {
+  const limiter = createLimiter(1);
+  const xong = [];
+  const giu = [];
+  const cho = () => new Promise((r) => giu.push(r));
+  // Lượt đầu chiếm chỗ; ba lượt sau xếp hàng theo thứ tự gọi.
+  const tatCa = ['a', 'b', 'c', 'd'].map((ten) =>
+    limiter.run(async () => {
+      xong.push(ten);
+      await cho();
+    }),
+  );
+  // Nhả lần lượt; mỗi lần nhả mở đúng một chỗ.
+  for (let i = 0; i < 4; i++) {
+    await new Promise((r) => setTimeout(r, 5));
+    giu.shift()?.();
+  }
+  await Promise.all(tatCa);
+  assert.deepEqual(xong, ['a', 'b', 'c', 'd'], 'ai tới trước được chạy trước');
+});
+
+// ───────── lỗi gateway: nhóm 5xx nói "lát nữa gọi lại đi" ─────────
+
+/*
+ * Ðo trên lần chạy thật 2026-09-21: một ticket chết với
+ * `FCI trả 524: <!DOCTYPE html>` sau 125 giây. `524` là origin-timeout của
+ * Cloudflare — đúng loại đáng thử lại, nhưng danh sách cũ chỉ có 429 và 503
+ * nên nó ném thẳng và cả lượt mất trắng.
+ */
+test('524/502/504/522 được thử lại; 500/525 thì không', async () => {
+  for (const status of [429, 502, 503, 504, 522, 524]) {
+    let lan = 0;
+    const ra = await withRetry(
+      async () => {
+        lan += 1;
+        if (lan === 1) throw new RetryableHttpError(status, `gateway trả ${status}`);
+        return 'xong';
+      },
+      { sleep: async () => {}, delays: [1, 2] },
+    );
+    assert.equal(ra, 'xong', `${status} phải được thử lại`);
+    assert.equal(lan, 2);
+    assert.ok(RETRY_STATUSES.has(status), `${status} phải nằm trong RETRY_STATUSES`);
+  }
+  // 500 có thể là lỗi tất định do chính payload; 525/526 là sai cấu hình TLS.
+  for (const status of [400, 401, 404, 500, 525, 526]) {
+    assert.ok(!RETRY_STATUSES.has(status), `${status} KHÔNG được thử lại`);
+  }
+});
+
+test('deadlineAt chặn chuỗi thử lại: một 524 chậm không kéo ticket đi tám phút', async () => {
+  // 15 giây trong bảng chờ là tổng thời gian NẰM CHỜ. Một 524 mất 125s mới biết
+  // là hỏng, nên bốn lần thử là hơn tám phút — trong khi bên gọi chỉ xin
+  // `timeout_sec`. Ðồng hồ giả để test không phải đợi thật.
+  let gio = 0;
+  const now = () => gio;
+  let lan = 0;
+  await assert.rejects(
+    () =>
+      withRetry(
+        async () => {
+          lan += 1;
+          gio += 125_000; // mỗi lượt mất 125 giây mới biết là hỏng
+          throw new RetryableHttpError(524, 'FCI trả 524');
+        },
+        { sleep: async () => {}, now, deadlineAt: 300_000 },
+      ),
+    /hết ngân sách thời gian/,
+  );
+  assert.equal(lan, 3, `phải dừng sau 3 lượt (~375s > 300s), chạy ${lan} lượt`);
+});
+
+test('không truyền deadlineAt thì giữ nguyên hành vi cũ: đủ 5 lượt', async () => {
+  let lan = 0;
+  await assert.rejects(
+    () => withRetry(async () => { lan += 1; throw new RetryableHttpError(503, 'tạm nghỉ'); },
+      { sleep: async () => {}, delays: [1, 2, 3, 4] }),
+    /đã thử lại 4 lần/,
+  );
+  assert.equal(lan, 5);
 });
