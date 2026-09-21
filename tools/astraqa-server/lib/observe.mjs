@@ -81,10 +81,43 @@ export function createRunLog({ runsDir, runId, jobId, redact = (s) => String(s),
   }
 
   /** Kết quả thành công: JSON đầy đủ + report_md tách riêng. */
+  /**
+   * Tên file lấy từ `run_id`, mà `run_id` do bên gọi đặt — nên hai job khác
+   * nhau có thể trỏ vào cùng một file.
+   *
+   * Ðo được trên lần chạy thật: hai job judge cùng `run_id` ghi cùng
+   * `results/<run_id>-judge.json`, và job thứ hai xoá sạch kết quả của job thứ
+   * nhất. Cả lý do tồn tại của thư mục này là "kết quả còn trên đĩa kể cả khi
+   * AstraQA rớt kết nối" — mất nó trong im lặng là hỏng đúng thứ nó bảo vệ.
+   *
+   * Không đổi tên file (bên gọi lấy kết quả bằng `/api/v1/jobs/<run_id>/result`,
+   * đổi là phá hợp đồng) và cũng không từ chối ghi — một lần chạy lại cùng
+   * `run_id` thường đúng là muốn thay bản cũ. Thứ phải bỏ đi là chữ "im lặng":
+   * nói ra trong log, và giữ bản cũ lại một bản `.prev` để còn đối chiếu.
+   */
+  async function rotateIfExists(file) {
+    if (!enabled) return false;
+    try {
+      await fs.access(file);
+    } catch {
+      return false;
+    }
+    await fs.rename(file, `${file}.prev`).catch(() => {});
+    return true;
+  }
+
   function saveResult(result) {
     const safe = redact(JSON.stringify(result, null, 2));
     const md = redact(String(result?.report_md ?? ''));
     return enqueue(async () => {
+      const daCo = await rotateIfExists(jsonFile);
+      await rotateIfExists(mdFile);
+      if (daCo) {
+        line(
+          `CẢNH BÁO: đã có kết quả cho run_id này — bản cũ chuyển sang ${path.basename(jsonFile)}.prev. ` +
+            'Hai job khác nhau dùng chung một run_id thì chỉ bản cuối còn nguyên tên.',
+        );
+      }
       await overwrite(jsonFile, safe + '\n');
       await overwrite(mdFile, md + '\n');
     });

@@ -291,3 +291,41 @@ test('log ghi NỐI: chạy lại cùng run_id không xoá vết lần trước'
   }
   assert.fail('log không dài thêm sau lần chạy thứ hai');
 });
+
+/*
+ * `run_id` do bên gọi đặt, mà tên file lấy từ nó — nên hai job khác nhau có thể
+ * trỏ vào cùng một file. Ðo trên lần chạy thật 2026-09-21: hai job judge cùng
+ * `run_id` ghi cùng `results/<run_id>-judge.json`, và job thứ hai xoá sạch kết
+ * quả của job thứ nhất. Cả lý do tồn tại của thư mục này là "kết quả còn trên
+ * đĩa kể cả khi AstraQA rớt kết nối".
+ */
+test('ghi đè kết quả cùng run_id: giữ bản cũ thành .prev và NÓI RA trong log', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'astraqa-prev-'));
+  try {
+    const dong = [];
+    const runLog = createRunLog({ runsDir: dir, runId: 'TRUNG-1', jobId: 'j1', log: (r) => dong.push(r) });
+
+    await runLog.saveResult({ run_id: 'TRUNG-1', items: [{ key: 'A-1' }], report_md: '# lan mot' });
+    await runLog.flush();
+    const lanMot = JSON.parse(await fs.readFile(runLog.jsonFile, 'utf8'));
+    assert.deepEqual(lanMot.items, [{ key: 'A-1' }]);
+    assert.ok(!dong.some((r) => r.includes('CẢNH BÁO')), 'lần đầu không có gì để cảnh báo');
+
+    await runLog.saveResult({ run_id: 'TRUNG-1', items: [{ key: 'B-9' }], report_md: '# lan hai' });
+    await runLog.flush();
+
+    const lanHai = JSON.parse(await fs.readFile(runLog.jsonFile, 'utf8'));
+    assert.deepEqual(lanHai.items, [{ key: 'B-9' }], 'bản mới nhất giữ nguyên tên file — hợp đồng không đổi');
+
+    const cu = JSON.parse(await fs.readFile(`${runLog.jsonFile}.prev`, 'utf8'));
+    assert.deepEqual(cu.items, [{ key: 'A-1' }], 'bản cũ phải còn đọc được');
+    assert.match(await fs.readFile(`${runLog.mdFile}.prev`, 'utf8'), /lan mot/);
+
+    assert.ok(
+      dong.some((r) => r.includes('CẢNH BÁO') && r.includes('.prev')),
+      `phải có dòng cảnh báo, log thấy: ${JSON.stringify(dong)}`,
+    );
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
