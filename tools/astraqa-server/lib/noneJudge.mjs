@@ -56,7 +56,9 @@ export async function judgeWithoutModel({ ticket, options, index }) {
    * Index rỗng thì `scan` là `null`: thà nói "không biết" còn hơn báo
    * `files_scanned: 0` trông như một phép quét đã chạy xong và không thấy gì.
    */
-  const scan = index.N > 0 ? { files_scanned: index.N, terms } : null;
+  const scan = index.N > 0
+    ? { files_scanned: index.N, terms, complete: index.complete === true, omitted: index.omitted }
+    : null;
 
   const coEvidence = evidence.length > 0;
   return {

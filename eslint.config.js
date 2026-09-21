@@ -17,6 +17,8 @@ export default tseslint.config(
       'web/**',
       '.venv/**',
       '.verify-baseline/**',
+      // Repositories cloned by astraqa-server are external runtime data.
+      '.workspace/**',
     ],
   },
   js.configs.recommended,

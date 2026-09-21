@@ -269,41 +269,45 @@ export function passesTighten(mode, { matched, queryTermCount, maxWeight, N }) {
 export async function buildIndex({ repoDir, fs, path, excludeGlobs = [], matchesAny = () => false }) {
   const files = [];
   const df = new Map();
+  const omitted = { cap: 0, read_error: 0, oversized: 0, excluded: 0 };
 
   async function walk(dir) {
-    if (files.length >= MAX_SCANNED_FILES) return;
+    if (files.length >= MAX_SCANNED_FILES) { omitted.cap += 1; return; }
     let entries;
     try {
       entries = await fs.readdir(dir, { withFileTypes: true });
     } catch {
+      omitted.read_error += 1;
       return;
     }
     for (const e of entries.sort((a, b) => a.name.localeCompare(b.name))) {
-      if (files.length >= MAX_SCANNED_FILES) return;
+      if (files.length >= MAX_SCANNED_FILES) { omitted.cap += 1; return; }
       const abs = path.join(dir, e.name);
       const rel = path.relative(repoDir, abs).replace(/\\/g, '/');
       if (e.isDirectory()) {
-        if (EXCLUDED_DIRS.has(e.name)) continue;
-        if (matchesAny(rel, excludeGlobs)) continue;
+        if (EXCLUDED_DIRS.has(e.name)) { omitted.excluded += 1; continue; }
+        if (matchesAny(rel, excludeGlobs)) { omitted.excluded += 1; continue; }
         await walk(abs);
         continue;
       }
       if (!e.isFile()) continue;
-      if (isExcludedPath(rel)) continue;
-      if (matchesAny(rel, excludeGlobs)) continue;
+      if (isExcludedPath(rel)) { omitted.excluded += 1; continue; }
+      if (matchesAny(rel, excludeGlobs)) { omitted.excluded += 1; continue; }
 
       let stat;
       try {
         stat = await fs.stat(abs);
       } catch {
+        omitted.read_error += 1;
         continue;
       }
-      if (stat.size > MAX_FILE_BYTES) continue;
+      if (stat.size > MAX_FILE_BYTES) { omitted.oversized += 1; continue; }
 
       let text;
       try {
         text = await fs.readFile(abs, 'utf8');
       } catch {
+        omitted.read_error += 1;
         continue;
       }
       if (text.includes('\u0000')) continue;
@@ -324,7 +328,10 @@ export async function buildIndex({ repoDir, fs, path, excludeGlobs = [], matches
   }
 
   await walk(repoDir);
-  return { files, df, N: files.length };
+  return {
+    files, df, N: files.length, omitted,
+    complete: omitted.cap === 0 && omitted.read_error === 0 && omitted.oversized === 0,
+  };
 }
 
 /**

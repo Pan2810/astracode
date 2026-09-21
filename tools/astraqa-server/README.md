@@ -41,18 +41,58 @@ Ngoài các biến này server không đọc biến cấu hình nào khác. Các
 | | `fci` (mặc định) | `cli` | `none` |
 |---|---|---|---|
 | Cách chạy | một request HTTP tới `FPT_BASE_URL/chat/completions`, `temperature: 0` | spawn CLI của AstraCode, agent tự duyệt repo | quét từ khoá tất định, không gọi model |
-| Model thấy gì | ngữ cảnh gom sẵn: cây file đã lọc + các dòng khớp từ khoá ticket, kèm số dòng thật | cả repo, qua tool đọc file/grep/tra symbol | — |
+| Model thấy gì | ngữ cảnh gom sẵn: cây file đã quét + các dòng khớp từ khoá ticket, kèm số dòng thật | cả repo, qua tool đọc file/grep/tra symbol | — |
+| Bản ghi quét (`item.scan`) | có — cùng corpus và cùng từ khoá với `none` | `null` (agent tự duyệt, server không có bản ghi) | có |
 | Cần | `FPT_BASE_URL`, `FPT_API_KEY`, `FPT_MODEL` | `ASTRACODE_CLI_PATH`, JWT AstraWork | không cần gì |
 | Đổi lại | rẻ, nhanh, đoán được thời gian | sâu hơn, chậm hơn | không phán được "đã xong", chỉ "có nhắc tới" |
 
-**`none` không bao giờ trả `done`.** Một phép quét từ khoá chứng minh được "có chỗ nhắc tới
-thứ này", không chứng minh được "đã làm xong" — trần của nó là `partial`. Dùng để dựng
-đường ống, kiểm hợp đồng với AstraQA, và làm mức nền tất định để so khi model nói khác.
+**`none` hiện trả `done` khi tìm thấy evidence path.** Trong backend này, `done` chỉ
+có nghĩa scanner tìm được candidate theo từ khoá; nó chưa chứng minh code đạt ticket
+hay acceptance criteria. Baseline 190 ticket ở `BASELINE_TRANSPORT.md` có 185 item
+`done` từ `none`. Việc đổi vocabulary/trạng thái thuộc bước tiếp theo của kế hoạch.
+
+`fci` và `none` dùng **chung một bộ tách từ khoá** — `queryTerms`/`normalizedKey` của
+`CANDIDATE_MATCHING_SPEC` (`lib/candidates.mjs`), và **chung một index toàn repo** dựng
+đúng một lần cho cả job. Trước đây `fci` có bộ tách riêng cắt ticket key thành mảnh
+(`GEN-R123` → `gen`) và không bỏ dấu tiếng Việt, nên ngữ cảnh gửi cho model gần như
+rỗng trên ticket tiếng Việt — mà `fci` lại là backend mặc định. Khác biệt duy nhất còn
+lại: chỗ này thiên về thu hồi (một từ khớp cũng thành ứng viên, rồi xếp hạng theo §4.2 và
+lấy 8 file đầu bảng) vì model mới là tầng lọc chính xác phía sau, còn `shortlistFor` của
+`none` phải tự chặt vì không có ai dọn sau. `TIGHTEN_MODE` vẫn chỉ nói về `none`.
+
+`fci` còn đọc thêm một **corpus phụ**: file hạ tầng/cấu hình nằm ngoài allowlist đuôi mã
+nguồn — `.mjs`, `.cjs`, `.json`, `.yml`, `.toml`, `.ps1`, `.sh`, `Dockerfile`…  Ðo trên
+`astraqa`: 396 file lọt allowlist, 187 file thì không, và trong 187 ấy có 44 file là nơi
+ticket thật sự được hiện thực (dựng thêm 36ms, so với 896ms của index chính). Ba điều
+ràng buộc nó:
+
+- **Ðọc thật, không chỉ liệt kê tên.** Ðưa cho model một danh sách tên file mà nó chưa
+  đọc nội dung là mời nó trích một đường dẫn nghe hợp lý, và bộ lọc bằng chứng chỉ kiểm
+  đường dẫn có tồn tại — trích dẫn ảo ấy sẽ lọt. Chỉ file có dòng khớp mới xuất hiện, kèm
+  số dòng thật.
+- **Không có `.md`/`.rst`/`.txt`.** Tài liệu hay viết ở thì tương lai ("sẽ bổ sung
+  endpoint X"); một câu như thế là đúng đường để model kết luận đã xong dựa trên một lời hứa.
+- **Không vào `scan.files_scanned`.** Bản ghi quét nói về phép quét tất định của spec, và
+  giữ cho nó đúng một nghĩa quan trọng hơn là gộp cho to. Trần riêng (3 file, 10 dòng) để
+  nó không lấn chỗ mã nguồn trong prompt.
+
+`none` **không** dùng corpus phụ: bằng chứng của nó phải đến từ đúng phép quét đã đóng băng.
+
+Vì phạm vi tìm của hai backend giờ là một, `fci` **trả bản ghi quét thật** thay vì
+`scan: null` như trước. `complete: false` (đụng trần, lỗi đọc, file quá lớn) vẫn là cái
+chốt: AstraQA không được suy ra `JIRA_AHEAD` từ một phép quét chưa đi hết repo.
 
 Chỗ duy nhất biết ba đường khác nhau là `judgeOnce()` trong `lib/analyze.mjs`; từ đó trở
 đi cùng bộ bóc JSON, cùng bộ lọc evidence, cùng `report_md`. Backend đang chạy được khai ở
 `GET /healthz`, ở `result.backend` và ở đầu `report_md`. Một request có thể ép backend cho
 riêng nó bằng field `"backend": "fci" | "cli" | "none"`.
+
+Với backend `cli`, mỗi ticket tạo trace JSONL từ **AgentLoop thật** ở
+`<ASTRACODE_RUNS_DIR>/traces/<job-id>/<ordinal>.jsonl`; trường
+`item.agent_trace.ref` trỏ tới artifact đó. Trace ghi từng loop, tool call,
+thời lượng/kết quả tool (hash, metadata, error/trust-zone), recovery và
+outcome. Mặc định không ghi nội dung source/tool/model; CLI chỉ ghi excerpt đã
+redact khi chạy với `--trace-content`.
 
 ## b. Khởi động
 
@@ -80,6 +120,27 @@ Muốn chạy thử toàn bộ đường ống mà **không tốn token LLM nào
 `ASTRACODE_CLI_PATH` vào `tools/astraqa-server/test/fakeCli.mjs`.
 
 ## c. Gọi thử
+
+`POST /api/v1/analyze` ưu tiên ticket JSON có schema rõ ràng:
+
+```json
+{
+  "repo_url": "https://example.com/team/repo.git",
+  "tickets_schema_version": 1,
+  "tickets": [
+    {
+      "key": "ORDER-1",
+      "summary": "Create order",
+      "status": "done",
+      "description": "POST /orders creates an order",
+      "acceptance_criteria": ["Returns 201", "Writes exactly one order"]
+    }
+  ]
+}
+```
+
+`tickets` và `tickets_md` loại trừ nhau. `tickets_md` vẫn được nhận cho client cũ;
+JSON giữ description và từng AC thành field riêng, không cắt ngầm nội dung khi parse.
 
 Tạo job:
 
@@ -216,11 +277,32 @@ Với `tickets` JSON thì chỗ được chỉ là chỉ số mảng: `"WEB-1" (
 (tickets[1])`. Còn `tickets_md` không dò ra cấu trúc nào thì lỗi nói luôn nó đã đọc tới
 đâu: `Ðọc từ dòng 3: "chỉ là một đoạn văn xuôi…"`.
 
+`503` khi sổ 200 job đã đầy **và tất cả đều đang chạy**. Sổ chỉ đẩy job đã đóng sổ
+(`succeeded`/`failed`/`cancelled`) ra; một job đang chạy không bao giờ bị đẩy đi. Trước
+đây nó xoá theo thứ tự chèn mà không nhìn trạng thái, nên job dài rơi khỏi sổ khi job thứ
+201 vào: `GET` trả 404 dù job vẫn sống và vẫn tiêu hạn mức, mà không còn đường nào gọi
+dừng nó. Một `503` thử lại được rẻ hơn một job vô hình.
+
+### Gọi dừng: `DELETE /api/v1/analyze/{job_id}`
+
+Cùng nghĩa với `DELETE /api/v1/judge/{job_id}`: **dừng, không phải xoá**. Ticket đã chấm
+xong ở lại nguyên vẹn — chúng đã được trả tiền rồi. Ticket chưa tới lượt, và cả ticket
+đang bay lúc bấm dừng, về với `reason: "cancelled"`, `code_status: "missing"`,
+`scan: null` — tức **chưa xét**, không phải "đã kiểm tra và thấy thiếu". Job đóng sổ với
+`status: "cancelled"`, không bao giờ là `succeeded`, và cũng không phải `failed`: hai
+cái chốt "không lượt nào chấm được" và "bộ lọc loại sạch bằng chứng" không áp cho một job
+được bảo dừng. `stats.tickets_cancelled` đếm phần chưa xét, tách khỏi `tickets_skipped`
+(vượt trần) và khỏi `judge_failed` (đã thử và hỏng).
+
+`GET` trong lúc job đang dọn trả `{"status":"cancelled","progress":{…}}` chưa kèm
+`result`; có `result` nghĩa là đã đóng sổ xong.
+
 Hai field tuỳ chọn làm mỏng một job:
 
 | Field | Là gì |
 |---|---|
 | `tickets_subset` | Mảng ticket key. **Chỉ quét evidence cho những key này**; repo vẫn clone đủ |
+| `options.max_files_per_ticket` | Trần bằng chứng, và là **sàn** số file ứng viên model được đọc (tối thiểu 8) |
 | `base_revision` | Mốc so sánh. Có thì kết quả mang thêm `changed_files[]` = `git diff --name-only base..HEAD` |
 
 ### `tickets_subset` — quét ít, vẫn trả đủ bảng
@@ -315,6 +397,11 @@ không được có: `verdict_guide` là một object `{TÊN: "định nghĩa"}`
 thẳng vào prompt bằng chính câu chữ ấy, và một câu trả lời nằm ngoài danh sách bị từ
 chối. Ðổi cách gọi ở bên kia không phải sửa gì ở đây.
 
+Judge dùng backend `fci` hoặc `cli` theo `ASTRACODE_JUDGE`. Cả hai giữ bộ lọc,
+cache, tiến độ và kết quả từng phần. `tickets[].acceptance_criteria` được đưa vào
+prompt; `ref` là SHA đầy đủ thì judge đọc đúng commit đó. Backend `cli` tiếp tục
+nhận guide có một verdict; backend `fci` yêu cầu ít nhất hai verdict.
+
 **`guidance_path` — quy ước riêng của codebase.** Một đường dẫn, không phải nội dung:
 tệp nằm trong repo job này sắp clone, nên gửi nội dung xuống nghĩa là bên gọi giữ một
 bản sao của một tệp nó không bao giờ đọc, và bản sao ấy sẽ lệch với nhánh mà judge
@@ -396,7 +483,8 @@ repo_url + revision + ticket key + hash(summary + description + status)
 ```
 
 "Dấu vân tay của prompt" là quy ước codebase đang áp (`guidance_path`) cộng ba tham số
-`context_lines` / `max_snippets` / `max_snippet_lines`. Nó có mặt vì cùng một ticket trên
+`context_lines` / `max_snippets` / `max_snippet_lines`, backend, verdict guide,
+acceptance criteria, dẫn chứng và kết luận sơ bộ. Nó có mặt vì cùng một ticket trên
 cùng một commit vẫn là hai câu hỏi khác nhau nếu prompt khác: bên gọi nới `max_snippets`
 đúng lúc họ muốn một câu trả lời tốt hơn, và trả lại kết luận rẻ tiền của lần trước là
 kiểu hỏng không ai nhìn thấy.
@@ -445,6 +533,24 @@ thứ quyết định verdict gần như luôn nằm ở vài chục dòng quanh
 ấy rơi để có người xem lại. Bên gọi vẫn nới lại được cho một job riêng bằng `options`
 (`context_lines`, `max_snippets`, `max_snippet_lines`) — nhưng mặc định phải là bản rẻ,
 vì mặc định mới là thứ chạy 190 lần mỗi đêm.
+
+### Lỗi gateway: thử lại đúng nhóm, và có ngân sách thời gian
+
+Danh sách thử lại là `429, 502, 503, 504, 522, 524` — hạn mức, cộng nhóm 5xx nghĩa là
+"proxy không nói chuyện được với origin lúc này". **Không có 4xx** (một `400` thử lại bốn
+lần là 15 giây mất trắng cho mỗi ticket của cả một đêm), không có `500` (có thể là lỗi tất
+định do chính payload) và không có `525`/`526` (sai cấu hình TLS, thử lại không bao giờ thành).
+
+`524` vào danh sách vì một sự cố thật: một ticket chết với `FCI trả 524: <!DOCTYPE html>`
+sau 125 giây, và vì mã ấy chưa được nhận nên cả lượt mất trắng. Hai thứ đi kèm bản sửa:
+
+- **Ngân sách thời gian (`deadlineAt`).** 15 giây trong bảng chờ là tổng thời gian NẰM CHỜ.
+  Một `429` trả về tức thì nên hai con số gần bằng nhau; một `524` thì mất 125 giây mới
+  biết là hỏng, nên bốn lần thử là hơn tám phút cho một ticket. Hết `timeout_sec` thì thôi
+  không thử tiếp, dù còn lượt.
+- **Thân lỗi HTML được gọi đúng tên.** Gateway hỏng giữa đường trả về một trang HTML; cắt
+  300 ký tự đầu của nó cho ra `<!DOCTYPE html>`, một dòng không nói gì. Giờ log ghi
+  `gateway trả trang HTML — "524: A timeout occurred" (không phải câu trả lời của model)`.
 
 ### 429: chờ theo `Retry-After`, không đoán
 
@@ -524,7 +630,8 @@ model: chấm mù rồi dán nhãn "AI" lên là kiểu hỏng tệ nhất của
 
 Judge **không có backend dự bị tất định**. `ASTRACODE_JUDGE=none` biết nói "có nhắc tới",
 đúng thứ tầng khớp từ khoá đã làm — chạy nó ở đây là tiêu thời gian để ra lại kết luận
-cũ dưới một cái nhãn sai. Thiếu `FPT_*` thì job `failed` ngay và nói ra.
+cũ dưới một cái nhãn sai. Với backend `fci`, thiếu `FPT_*` thì job `failed` ngay
+và nói ra; backend `cli` dùng `ASTRACODE_CLI_PATH` và JWT AstraWork.
 
 ## Những chỗ cố tình nghiêm
 
@@ -554,7 +661,24 @@ cũ dưới một cái nhãn sai. Thiếu `FPT_*` thì job `failed` ngay và nó
 - **Token không rời tiến trình.** `astrawork_token`, `repo_token`,
   `ASTRACODE_SERVICE_TOKEN`, key LLM bị che ở mọi log và mọi message lỗi — bằng cả literal
   lẫn pattern (bắt được cả secret không khai trước). `test/redact.test.mjs` canh điều này.
-- **Job nằm trong bộ nhớ**, tối đa 200 job gần nhất. Không DB, không trạng thái trên đĩa.
+- **`progress` đếm việc PHẢI LÀM, không phải số dòng trong bảng.** `total` là số lượt thật
+  sự phải quét; bốn ô `tickets` / `not_in_subset` / `skipped_quota_limit` / `cancelled` nói
+  vì sao nó nhỏ hơn số ticket gửi lên, để bên gọi không phải tự trừ. Bản trước đặt `total`
+  bằng số ticket, nên một request 184 ticket kèm `tickets_subset` 8 key báo về
+  `{"done":1,"total":184}` — người ngồi xem tưởng còn 183 lượt nữa.
+- **Kết quả cũ không bị xoá trong im lặng.** `run_id` do bên gọi đặt mà tên file lấy từ nó,
+  nên hai job khác nhau có thể trỏ vào cùng `results/<run_id>.json`. Bản mới vẫn giữ nguyên
+  tên (bên gọi lấy bằng `/api/v1/jobs/<run_id>/result`), nhưng bản cũ được chuyển sang
+  `.prev` và log ghi một dòng cảnh báo. Cả lý do tồn tại của thư mục này là "kết quả còn
+  trên đĩa kể cả khi AstraQA rớt kết nối".
+- **Job nằm trong bộ nhớ**, tối đa 200 job. Không DB, không trạng thái trên đĩa. Chỉ job
+  **đã đóng sổ** mới bị đẩy ra khi hết chỗ; hết chỗ mà toàn job đang chạy thì `503`. Luật
+  này nằm ở `lib/jobs.mjs`, có test riêng ở `test/jobs.test.mjs`.
+- **Mỗi request nhận đúng một hồi âm.** Handler trước đây là một `async` truyền thẳng cho
+  `createServer`, nên một route ném là một promise bị bỏ rơi: client không nhận gì và treo
+  tới khi hết giờ, còn Node coi đó là unhandled rejection và mặc định giết tiến trình. Giờ
+  mọi đường ném đều ra `500`, và job đã vào sổ mà chưa kịp chạy thì được bỏ ra — nếu không
+  thì cái chỗ ấy mất vĩnh viễn, vì sổ chỉ đẩy job đã đóng sổ. Xem `test/resilience.test.mjs`.
 - **`/admin` đòi token, kể cả từ chính máy này.** Loopback từng được miễn, vì trình duyệt
   không gắn `Authorization` vào một lần điều hướng thường — nhưng "chạy trên localhost"
   gồm cả mọi tab đang mở một trang lạ, và trang này liệt kê mọi job, mọi repo, mọi ticket.
@@ -580,12 +704,25 @@ cũ dưới một cái nhãn sai. Thiếu `FPT_*` thì job `failed` ngay và nó
 
 ## Chạy test
 
+`items[].assessment` đánh giá từng acceptance criterion riêng với verdict Jira/source.
+Hai chiều khẳng định chịu hai luật khác nhau: `satisfied`/`partial` phải có dẫn chứng
+file/dòng còn tồn tại, còn `not_satisfied` thì **không** — một tiêu chí chưa làm tự
+nhiên không có dẫn chứng, nên điều kiện của nó là PHẠM VI QUÉT (`scan.complete`, hoặc
+một phiên agent đã tự duyệt repo và để lại trace). Thiếu cả hai thì hạ về `unknown`:
+"không thấy" chỉ là "chưa nhìn". Bản trước đòi dẫn chứng cho cả chiều âm, nên mọi
+`not_satisfied` đều thành `unknown` và `state: "not_implemented"` gần như không bao giờ
+đạt tới. Không có bản ghi chạy test thì `test_status: not_run` và tối đa
+`implemented_unverified`. `mapping_state`
+phân biệt key ticket xuất hiện trong dòng code dẫn chứng (`linked`), chỉ có
+candidate (`weak_link`) và chưa liên kết (`unlinked`). Scan thiếu file vì cap,
+file quá lớn hoặc lỗi đọc mang `complete: false`, không được suy ra JIRA_AHEAD.
+
 ```bash
 cd tools/astraqa-server
 node --test test/*.test.mjs
 ```
 
-201 test, **không cần mạng, không cần gateway, không tốn token**: repo git thật được dựng
+Các test **không cần mạng, không cần gateway, không tốn token**: repo git thật được dựng
 trong thư mục tạm, backend `cli` đóng thế bằng `test/fakeCli.mjs`, backend `fci` đóng thế
 bằng một endpoint OpenAI-compatible dựng tại chỗ — nhưng đi qua đúng mọi bước mà bản chạy
 thật đi.

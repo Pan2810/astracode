@@ -261,6 +261,17 @@ test('model chỉ thấy đúng đoạn được trích, kèm số dòng thật'
   assert.equal(seen.at(-1).auth, `Bearer ${KEY}`);
 });
 
+test('structured acceptance criteria reach the model prompt', async () => {
+  reply = null;
+  const { job_id } = await post({ repo_url: repoUrl, verdict_guide: GUIDE,
+    tickets: [ticket('AC-MERGE', { acceptance_criteria: ['Returns 201', 'Writes one order'] })],
+  }).then((r) => r.json());
+  const done = await settle(job_id);
+  assert.equal(done.status, 'succeeded', done.error);
+  assert.equal(done.results[0].tier, 'ai');
+  assert.match(seen.at(-1).prompt, /ACCEPTANCE CRITERIA:\n1\. Returns 201\n2\. Writes one order/);
+});
+
 test('một verdict ngoài danh sách bị từ chối, ticket đó giữ tầng grep', async () => {
   reply = ({ key }) => ({
     body: {

@@ -15,6 +15,24 @@
  */
 import { withRetry, RetryableHttpError, RETRY_STATUSES, parseRetryAfter } from './retry.mjs';
 
+/**
+ * Mô tả thân lỗi cho người đọc log.
+ *
+ * Gateway hỏng giữa đường trả về một TRANG HTML, không phải JSON. Cắt 300 ký tự
+ * đầu của nó cho ra `FCI trả 524: <!DOCTYPE html>` — một dòng không nói gì, và
+ * đó đúng là dòng đã hiện ra trong lần chạy thật. `<title>` của trang ấy mới là
+ * chỗ có thông tin ("504 Gateway Time-out"), nên lấy nó và nói thẳng đây là
+ * trang HTML chứ không phải câu trả lời của model.
+ */
+export function describeErrorBody(raw, contentType = '') {
+  const text = String(raw ?? '').trim();
+  if (!text) return '(không có body)';
+  const looksHtml = /html/i.test(String(contentType)) || /^\s*<(?:!doctype|html)\b/i.test(text);
+  if (!looksHtml) return text.slice(0, 300);
+  const title = /<title[^>]*>([\s\S]*?)<\/title>/i.exec(text)?.[1]?.replace(/\s+/g, ' ').trim();
+  return `gateway trả trang HTML${title ? ` — "${title}"` : ''} (không phải câu trả lời của model)`;
+}
+
 export function fciConfigured(config) {
   return Boolean(config.fciBaseUrl && config.fciApiKey && config.fciModel);
 }
@@ -64,8 +82,8 @@ export async function askFci({ config, prompt, timeoutMs, redact, onRetry, onAtt
       }
 
       if (!res.ok) {
-        const body = redact(await res.text().catch(() => '')).slice(0, 300);
-        const msg = `FCI trả ${res.status}: ${body || '(không có body)'}`;
+        const body = describeErrorBody(redact(await res.text().catch(() => '')), res.headers.get('content-type'));
+        const msg = `FCI trả ${res.status}: ${body}`;
         // 429/503 mới được thử lại; mọi mã khác ném thẳng, không chờ.
         if (RETRY_STATUSES.has(res.status)) {
           // `Retry-After` là nhà cung cấp tự nói còn bao lâu nữa mới hết cửa sổ
@@ -88,6 +106,7 @@ export async function askFci({ config, prompt, timeoutMs, redact, onRetry, onAtt
       }
       return { text, usage: json.usage };
     },
-    { onRetry, sleep, signal },
+    // Ngân sách của cả lượt, kể cả những lần thử lại: xem `deadlineAt` ở retry.mjs.
+    { onRetry, sleep, signal, deadlineAt: Number.isFinite(timeoutMs) ? Date.now() + timeoutMs : null },
   );
 }

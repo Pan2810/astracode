@@ -151,23 +151,14 @@ test('tiêu chí chấp nhận vào prompt, mỗi tiêu chí một dòng, đánh
   assert.equal(done.status, 'succeeded', done.error);
 
   const prompt = seen.at(-1).prompt;
-  assert.match(prompt, /Tiêu chí chấp nhận/);
+  assert.match(prompt, /Acceptance criteria/);
   AC.forEach((text, i) => {
     // Ðúng dạng "1. <tiêu chí>" — số ấy chính là `id` model phải dùng lại.
     assert.ok(prompt.includes(`${i + 1}. ${text}`), `prompt thiếu dòng "${i + 1}. ${text}"`);
   });
   // Và schema yêu cầu chấm từng tiêu chí, bằng đúng từ vựng của AstraQA.
-  assert.match(prompt, /"assessment"/);
+  assert.match(prompt, /"ac_assessment"/);
   assert.match(prompt, /satisfied \| partial \| not_satisfied \| unknown/);
-});
-
-test('ticket không có tiêu chí thì prompt không mọc thêm mục nào', async () => {
-  seen = [];
-  answer = null;
-  await analyze({ repo_url: repoUrl, tickets: [ticket({ key: 'NO-AC', acceptance_criteria: [] })] });
-  const prompt = seen.at(-1).prompt;
-  assert.equal(prompt.includes('Tiêu chí chấp nhận'), false);
-  assert.equal(prompt.includes('"assessment"'), false);
 });
 
 test('acceptance_hint là đường lui khi không có danh sách', () => {
@@ -191,13 +182,11 @@ test('assessment về đúng hình dạng AstraQA đọc: {criteria:[{id,text,st
     confidence: 0.8,
     evidence: [{ path: 'src/login.py', lines: '1-2', note: '' }],
     reason: 'matched_by_key',
-    assessment: {
-      criteria: [
-        { id: 1, status: 'satisfied', evidence: [{ path: 'src/login.py', lines: '1-2', note: 'authenticate()' }], reason: 'có hàm đăng nhập' },
-        { id: 2, status: 'partial', evidence: [{ path: 'src/lockout.py', lines: '4-5', note: 'đếm lần hỏng' }], reason: 'thiếu phần 15 phút' },
-        // Tiêu chí 3 model không nhắc tới.
-      ],
-    },
+    ac_assessment: [
+      { id: 1, status: 'satisfied', evidence: [{ path: 'src/login.py', lines: '1-2', note: 'authenticate()' }], reason: 'có hàm đăng nhập' },
+      { id: 2, status: 'partial', evidence: [{ path: 'src/lockout.py', lines: '4-5', note: 'đếm lần hỏng' }], reason: 'thiếu phần 15 phút' },
+      // Tiêu chí 3 model không nhắc tới.
+    ],
   });
   const done = await analyze({ repo_url: repoUrl, tickets: [ticket({ key: 'AC-SHAPE' })] });
   answer = null;
@@ -216,7 +205,7 @@ test('assessment về đúng hình dạng AstraQA đọc: {criteria:[{id,text,st
   assert.deepEqual(a.criteria.map((c) => c.status), ['satisfied', 'partial', 'unknown']);
   // Tiêu chí model bỏ qua → unknown, không bằng chứng, không bịa.
   assert.deepEqual(a.criteria[2].evidence, []);
-  assert.equal(a.criteria[2].reason, '');
+  assert.equal(a.criteria[2].reason, null);
   // Bằng chứng của từng tiêu chí giữ nguyên path + lines để AstraQA mở được.
   assert.equal(a.criteria[0].evidence[0].path, 'src/login.py');
   assert.equal(a.criteria[0].evidence[0].lines, '1-2');
@@ -228,40 +217,37 @@ test('assessment về đúng hình dạng AstraQA đọc: {criteria:[{id,text,st
   assert.match(done.result.report_md, /1\. \*\*satisfied\*\*/);
 });
 
-test('met/unmet của model quy về từ vựng AstraQA, và không chỉ được dòng thì tụt về unknown', async () => {
+test('not_satisfied cần phạm vi quét đã đi tìm, không chỉ cần dẫn chứng; id lạ và đường dẫn bịa đều tụt về unknown', async () => {
   answer = ({ key }) => ({
     key,
     code_status: 'done',
     confidence: 0.9,
     evidence: [{ path: 'src/login.py', lines: '1', note: '' }],
+    scan: { complete: true, files_scanned: 2 },
     reason: 'matched_by_key',
-    assessment: {
-      criteria: [
-        // Chữ của con người, không phải từ vựng hợp đồng.
-        { id: 1, status: 'met', evidence: [{ path: 'src/login.py', lines: '1-2' }], reason: 'x' },
-        // "unmet" → not_satisfied, nhưng KHÔNG có bằng chứng nào → unknown.
-        { id: 2, status: 'unmet', evidence: [], reason: 'không thấy' },
-        // Ðường dẫn bịa: bị bộ lọc loại, nên trạng thái cũng không giữ được.
-        { id: 3, status: 'satisfied', evidence: [{ path: 'src/khong-co-that.py', lines: '10-12' }], reason: 'y' },
-      ],
-    },
+    ac_assessment: [
+      { id: 1, status: 'satisfied', evidence: [{ path: 'src/login.py', lines: '1-2' }], reason: 'x' },
+      // Ðã tìm và không thấy — lượt này có scan.complete nên not_satisfied trụ được.
+      { id: 2, status: 'not_satisfied', evidence: [], reason: 'không thấy khoá tài khoản' },
+      // Ðường dẫn bịa: bị bộ lọc loại, nên trạng thái cũng không giữ được.
+      { id: 3, status: 'satisfied', evidence: [{ path: 'src/khong-co-that.py', lines: '10-12' }], reason: 'y' },
+    ],
   });
   const done = await analyze({ repo_url: repoUrl, tickets: [ticket({ key: 'AC-MAP' })] });
   answer = null;
   assert.equal(done.status, 'succeeded', done.error);
 
   const c = done.result.items[0].assessment.criteria;
-  assert.equal(c[0].status, 'satisfied', 'met → satisfied');
-  assert.equal(c[1].status, 'unknown', 'không có chỗ để chỉ thì không phải kết luận');
+  assert.equal(c[0].status, 'satisfied');
+  assert.equal(c[1].status, 'not_satisfied', 'lượt có scan.complete thì một khẳng định âm không cần dẫn chứng');
   assert.equal(c[2].status, 'unknown', 'đường dẫn bịa bị loại, trạng thái không trụ lại');
   assert.deepEqual(c[2].evidence, []);
-  assert.ok(done.result.stats.ac_evidence_dropped >= 1);
 });
 
-test('ticket không có tiêu chí thì assessment là null, không phải mảng rỗng', async () => {
+test('ticket không có tiêu chí thì assessment là not_assessed rỗng, không phải mảng ac_assessment', async () => {
   answer = null;
   const done = await analyze({ repo_url: repoUrl, tickets: [ticket({ key: 'AC-NULL', acceptance_criteria: [] })] });
-  assert.equal(done.result.items[0].assessment, null);
+  assert.deepEqual(done.result.items[0].assessment, { state: 'not_assessed', test_status: 'not_run', criteria: [] });
   assert.equal(done.result.stats.items_with_assessment, 0);
 });
 

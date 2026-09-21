@@ -18,6 +18,16 @@ const argv = process.argv.slice(2);
 const pi = argv.indexOf('-p');
 const prompt = pi >= 0 ? (argv[pi + 1] ?? '') : '';
 
+if (prompt.includes('Review the supplied code evidence for ticket ')) {
+  const key = /Review the supplied code evidence for ticket ([^.]*)\./.exec(prompt)?.[1]?.trim() || '';
+  const guide = JSON.parse(/Choose exactly one verdict key from this guide: (\{[^\n]*\})\./.exec(prompt)?.[1] || '{}');
+  const verdict = Object.keys(guide)[0];
+  console.log('```json');
+  console.log(JSON.stringify({ key, verdict, confidence: 0.7, reason: 'fake CLI inspected cited code' }));
+  console.log('```');
+  process.exit(0);
+}
+
 const key = (/Ticket key:\s*(.+)/.exec(prompt)?.[1] ?? '').trim();
 if (!key) {
   console.error('fakeCli: prompt không có dòng "Ticket key:".');
@@ -85,6 +95,10 @@ console.log(
           confidence: Number((0.5 + (h % 50) / 100).toFixed(2)),
           evidence,
           reason: files.length ? 'matched_by_key' : 'matched_by_summary',
+          ac_assessment: key === 'A-1' ? [
+            { id: 1, status: 'satisfied', evidence: evidence.slice(0, 1), reason: 'source line found', test_status: 'passed' },
+            { id: 2, status: 'satisfied', evidence: [{ path: 'missing-ac.ts', lines: '1' }], reason: 'fabricated citation' },
+          ] : [],
         },
       ],
     },

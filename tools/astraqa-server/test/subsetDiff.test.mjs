@@ -235,3 +235,49 @@ test('sai kiểu thì 400 ngay, không thành một job chạy tới lúc clone 
     assert.match((await res.json()).error, re);
   }
 });
+
+/*
+ * Tiến độ phải đếm VIỆC PHẢI LÀM.
+ *
+ * Ðo trên lần chạy thật 2026-09-21: một request gửi 184 ticket kèm
+ * `tickets_subset` 8 key báo về `{"done":1,"total":184}` — người ngồi xem
+ * tưởng còn 183 lượt nữa, trong khi chỉ có 8 lượt phải chạy.
+ */
+test('progress.total là số lượt PHẢI QUÉT, không phải số ticket gửi lên', async () => {
+  const { job_id } = await post({
+    run_id: 'SUB-PROGRESS',
+    repo_url: repoUrl,
+    tickets_md: ticketsMd(allKeys),
+    tickets_subset: WANT,
+  }).then((r) => r.json());
+
+  // Chờ tới khi job ÐÓNG SỔ, và nói ra nếu không — bản trước bỏ cuộc sau 10s
+  // rồi vẫn đi kiểm tiếp, nên dưới tải song song nó đọc một tiến độ dở dang.
+  let xong = null;
+  for (let i = 0; i < 1200 && !xong; i++) {
+    const j = await fetch(`${base}/api/v1/analyze/${job_id}`).then((r) => r.json());
+    if (j.status === 'succeeded' || j.status === 'failed') {
+      xong = j;
+      break;
+    }
+    if (j.progress) {
+      assert.equal(j.progress.total, WANT.length, `total phải là ${WANT.length}, nhận ${j.progress.total}`);
+      assert.ok(j.progress.done <= j.progress.total, 'done không bao giờ vượt total');
+    }
+    await new Promise((s) => setTimeout(s, 25));
+  }
+  assert.ok(xong, 'job phải đóng sổ trong thời gian chờ');
+  assert.equal(xong.status, 'succeeded', xong.error);
+
+  // Sau khi xong, sổ /admin vẫn giữ tiến độ cuối — chỗ kiểm được tất định.
+  const rows = await fetch(`${base}/api/v1/jobs`, { headers: { Accept: 'application/json' } }).then((r) => r.json());
+  const row = rows.jobs.find((x) => x.run_id === 'SUB-PROGRESS');
+  assert.ok(row, 'phải có dòng cho run này');
+  assert.equal(row.progress.done, WANT.length);
+  assert.equal(row.progress.total, WANT.length);
+  // Bốn ô nói vì sao total nhỏ hơn số ticket, để bên gọi không phải tự trừ.
+  assert.equal(row.progress.tickets, 190);
+  assert.equal(row.progress.not_in_subset, 184);
+  assert.equal(row.progress.skipped_quota_limit, 0);
+  assert.equal(row.progress.cancelled, 0);
+});

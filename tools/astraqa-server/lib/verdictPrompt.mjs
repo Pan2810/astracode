@@ -55,6 +55,9 @@ function ticketBlock(ticket) {
     `Ticket key: ${ticket.key}`,
     ticket.summary ? `Tiêu đề: ${clip(ticket.summary)}` : '',
     ticket.description ? `Mô tả: ${clip(ticket.description)}` : '',
+    ticket.acceptance_criteria?.length
+      ? `ACCEPTANCE CRITERIA:\n${ticket.acceptance_criteria.map((item, i) => `${i + 1}. ${item}`).join('\n')}`
+      : '',
     ticket.status ? `Trạng thái bên kế hoạch: ${ticket.status}` : '',
     ticket.grep_verdict ? `Kết luận sơ bộ (tầng khớp từ khoá): ${ticket.grep_verdict}` : '',
     ticket.grep_reason ? `Lý do của kết luận sơ bộ: ${ticket.grep_reason}` : '',

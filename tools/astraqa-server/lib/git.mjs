@@ -59,7 +59,12 @@ export async function cloneRepo({ repoUrl, ref, repoToken, destDir, redact, time
   const common = ['-c', 'credential.helper=', 'clone', '--no-tags', '--quiet'];
 
   try {
-    if (ref) {
+    if (/^[a-f0-9]{40}$/i.test(ref || '')) {
+      // A pin may be older than a shallow clone's history. Fetch the complete
+      // branch history and fail if this exact commit is not reachable.
+      await git([...common, url, destDir], { timeoutMs });
+      await git(['checkout', '--quiet', ref], { cwd: destDir, timeoutMs });
+    } else if (ref) {
       try {
         // Nhánh/tag: một lần fetch nông là đủ.
         await git([...common, '--depth', '1', '--single-branch', '--branch', ref, url, destDir], { timeoutMs });

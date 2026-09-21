@@ -33,6 +33,7 @@ import { buildVerdictPrompt } from './verdictPrompt.mjs';
 import { extractJsonBlock } from './jsonBlock.mjs';
 import { askFci, fciConfigured } from './fciJudge.mjs';
 import { openCache, cacheKey, CACHE_DIRNAME } from './judgeCache.mjs';
+import { runCli } from './analyze.mjs';
 
 /**
  * Ngân sách prompt.
@@ -76,7 +77,8 @@ export function parseJudgeTickets(raw) {
     const conf = Number(t.grep_confidence);
     return {
       key,
-      summary: String(t.summary ?? '').trim(),
+      summary: String(t.summary ?? t.title ?? '').trim(),
+      acceptance_criteria: Array.isArray(t.acceptance_criteria) ? t.acceptance_criteria.map(String) : [],
       // Phần mô tả dài, nếu bên gọi gửi. Vào prompt đã cắt bớt (xem
       // `verdictPrompt.mjs`): một mô tả 8 nghìn chữ không làm verdict đúng hơn.
       description: String(t.description ?? '').trim(),
@@ -107,7 +109,7 @@ export function parseJudgeTickets(raw) {
  * cái chặn duy nhất giữa một model nói lung tung và một verdict sai nằm trên
  * màn hình của người dùng — sẽ không thực hiện được.
  */
-export function parseVerdictGuide(raw) {
+export function parseVerdictGuide(raw, minimum = 2) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
     throw new Error('"verdict_guide" phải là một JSON object {TÊN_VERDICT: "định nghĩa"}.');
   }
@@ -117,7 +119,7 @@ export function parseVerdictGuide(raw) {
     if (!key) continue;
     guide[key] = String(text ?? '').trim();
   }
-  if (Object.keys(guide).length < 2) {
+  if (Object.keys(guide).length < minimum) {
     throw new Error('"verdict_guide" phải có ít nhất hai verdict để phân biệt.');
   }
   return guide;
@@ -209,6 +211,12 @@ export async function readSnippets({ repoDir, evidence, options }) {
     }
     let text;
     try {
+      const realRepo = await fs.realpath(repoDir);
+      const real = await fs.realpath(abs);
+      if (real !== realRepo && !real.startsWith(realRepo + path.sep)) {
+        skipped.push({ path: ev.path, why: 'đường dẫn thoát khỏi repo' });
+        continue;
+      }
       text = await fs.readFile(abs, 'utf8');
     } catch {
       skipped.push({ path: ev.path, why: 'không đọc được trong repo đã clone' });
@@ -237,11 +245,13 @@ export async function readSnippets({ repoDir, evidence, options }) {
 /** Model đã trả gì. Chỉ nhận một verdict có trong guide; sai thì ném. */
 export function pickVerdict(parsed, { key, guide }) {
   const block = extractJsonBlock(typeof parsed === 'string' ? parsed : JSON.stringify(parsed));
-  const item = Array.isArray(block?.items) ? block.items[0] : block;
+  const item = Array.isArray(block?.items) ? block.items[0] : Array.isArray(block?.results) ? block.results[0] : block;
   if (!item || typeof item !== 'object') {
     throw new Error(`${key}: câu trả lời không có object nào để đọc.`);
   }
-  const verdict = String(item.verdict ?? '').trim().toUpperCase();
+  if (String(item.key ?? '').trim() !== key) throw new Error(`${key}: model returned a different ticket key`);
+  const rawVerdict = String(item.verdict ?? '').trim();
+  const verdict = Object.hasOwn(guide, rawVerdict) ? rawVerdict : rawVerdict.toUpperCase();
   if (!Object.prototype.hasOwnProperty.call(guide, verdict)) {
     throw new Error(
       `${key}: verdict "${verdict || '(rỗng)'}" không nằm trong danh sách được phép ` +
@@ -267,10 +277,12 @@ export function pickVerdict(parsed, { key, guide }) {
  * đó ngay thay vì gom lại trả một lần ở cuối.
  */
 export async function runJudgeJob({ job, body, config, redact, log, limiter, usage }) {
+  const backend = config.judgeBackend || 'fci';
   const options = { ...DEFAULT_JUDGE_OPTIONS, ...(body.options ?? {}) };
   const timeoutMs = Math.max(1, Number(options.timeout_sec) || DEFAULT_JUDGE_OPTIONS.timeout_sec) * 1000;
   const all = parseJudgeTickets(body.tickets);
-  const guide = parseVerdictGuide(body.verdict_guide);
+  // Keep the existing CLI contract, which accepts a single allowed verdict.
+  const guide = parseVerdictGuide(body.verdict_guide, backend === 'cli' ? 1 : 2);
   const selection = parseSelection(body);
 
   /*
@@ -287,7 +299,7 @@ export async function runJudgeJob({ job, body, config, redact, log, limiter, usa
   const tickets = cap > 0 ? all.slice(0, cap) : all;
   const over = cap > 0 ? all.slice(cap) : [];
 
-  if (!fciConfigured(config)) {
+  if (backend === 'none' || (backend !== 'cli' && !fciConfigured(config))) {
     // Judge là tầng model, không có tầng dự bị tất định: `none` chỉ biết "có
     // nhắc tới", đúng thứ tầng grep đã làm. Chạy nó ở đây là tiêu thời gian để
     // ra lại kết luận cũ dưới một cái nhãn "AI" — nhãn sai là tệ hơn không có.
@@ -359,6 +371,9 @@ export async function runJudgeJob({ job, body, config, redact, log, limiter, usa
       timeoutMs,
     });
     job.revision = head || null;
+    if (/^[a-f0-9]{40}$/i.test(String(body.ref || '')) && head.toLowerCase() !== body.ref.toLowerCase()) {
+      throw new Error('Judge clone did not resolve to the pinned source revision.');
+    }
 
     /*
      * Quy ước riêng của codebase, nếu bên gọi trỏ tới một tệp.
@@ -390,6 +405,9 @@ export async function runJudgeJob({ job, body, config, redact, log, limiter, usa
      * — xem chú thích ở `cacheKey`.
      */
     const promptShape = JSON.stringify({
+      backend,
+      cliPath: backend === 'cli' ? config.cliPath : undefined,
+      guide,
       guidance: guidance || '',
       context_lines: options.context_lines,
       max_snippets: options.max_snippets,
@@ -405,7 +423,8 @@ export async function runJudgeJob({ job, body, config, redact, log, limiter, usa
         status: ticket.status,
         rulesVersion: selection.rulesVersion,
         model: config.fciModel,
-        prompt: promptShape,
+        prompt: JSON.stringify({ shape: promptShape, acceptance_criteria: ticket.acceptance_criteria,
+          evidence: ticket.evidence, grep_verdict: ticket.grep_verdict, grep_reason: ticket.grep_reason }),
       });
 
     /*
@@ -486,9 +505,25 @@ export async function runJudgeJob({ job, body, config, redact, log, limiter, usa
           // gọi phân biệt "chưa xét" với "đã xét, không kết luận được".
           return { key: ticket.key, tier: 'grep', error: 'đã dừng trước khi tới lượt' };
         }
-        const prompt = buildVerdictPrompt({ ticket, guide, snippets, skipped, guidance });
-        const { text, usage: spent } = await limiter.run(() =>
-          askFci({
+        const prompt = (backend === 'cli'
+          ? `Inspect the repository at the current commit and independently check the cited implementation.\nReview the supplied code evidence for ticket ${ticket.key}. Choose exactly one verdict key from this guide: ${JSON.stringify(guide)}.\n`
+          : '') + buildVerdictPrompt({ ticket, guide, snippets, skipped, guidance });
+        const { text, usage: spent } = await limiter.run(async () => {
+          if (job.abort?.signal?.aborted) throw new Error('đã dừng trước khi tới lượt');
+          if (backend === 'cli') {
+            usage.model_calls += 1;
+            counted.model_calls += 1;
+            publish();
+            const result = await runCli({
+              cliPath: config.cliPath, cwd: repoDir, prompt,
+              astraworkToken: body.astrawork_token || config.astraworkJwt || '',
+              timeoutMs, signal: job.abort?.signal,
+              traceFile: path.join(config.runsDir || config.workspaceDir, 'traces', job.id, `judge-${tickets.indexOf(ticket) + 1}.jsonl`),
+            });
+            if (result.timedOut || result.code !== 0) throw new Error(`AstraCode CLI failed (${result.code}).`);
+            return { text: result.stdout };
+          }
+          return askFci({
             config,
             prompt,
             timeoutMs,
@@ -513,8 +548,8 @@ export async function runJudgeJob({ job, body, config, redact, log, limiter, usa
                   `${source === 'retry-after' ? 'theo Retry-After' : 'theo bảng chờ'}). ${message.slice(0, 160)}`,
               );
             },
-          }),
-        );
+          });
+        });
         // Token của nhà cung cấp, không phải ước lượng của ta. Thiếu field thì
         // cộng 0: đếm thiếu còn đọc được, đếm bịa thì không.
         const tin = Number(spent?.prompt_tokens);

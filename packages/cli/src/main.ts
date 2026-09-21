@@ -25,6 +25,8 @@ const USAGE = `
     astracode -p "câu hỏi"         chạy một lượt rồi thoát (script, CI)
     echo "câu hỏi" | astracode     tương tự, qua pipe
     astracode --raw                không tô markdown, in chữ thô
+    astracode --trace-jsonl FILE   ghi audit từng loop/tool theo JSONL (opt-in)
+    astracode --trace-content      kèm excerpt đã redact, tối đa 4.000 ký tự/event
 
   ${c.bold('Lệnh')}
     login [--token JWT] [--code MÃ]     đăng nhập AstraWork

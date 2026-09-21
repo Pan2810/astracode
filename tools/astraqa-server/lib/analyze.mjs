@@ -21,9 +21,10 @@ import { extractJsonBlock, pickItem } from './jsonBlock.mjs';
 import { matchesAny } from './globs.mjs';
 import { askFci, fciConfigured } from './fciJudge.mjs';
 import { judgeWithoutModel } from './noneJudge.mjs';
-import { buildRepoContext, renderContext } from './repoContext.mjs';
+import { buildAuxCorpus, buildRepoContext, renderContext, MIN_CONTEXT_FILES } from './repoContext.mjs';
 import { createLimiter } from './limit.mjs';
 import { buildIndex } from './candidates.mjs';
+import { normalizeAssessment, notAssessed } from './assessment.mjs';
 
 /**
  * `tickets_subset` — chỉ quét đúng những ticket này.
@@ -82,9 +83,13 @@ function childEnv(astraworkToken) {
   return env;
 }
 
-function runCli({ cliPath, cwd, prompt, astraworkToken, timeoutMs, signal }) {
+export function runCli({ cliPath, cwd, prompt, astraworkToken, timeoutMs, signal, traceFile = '' }) {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [cliPath, '--mode=plan', '--raw', '-p', prompt], {
+    const args = [cliPath, '--mode=plan', '--raw'];
+    // Produced by the real CLI/AgentLoop rather than inferred from stdout.
+    if (traceFile) args.push('--trace-jsonl', traceFile);
+    args.push('-p', prompt);
+    const child = spawn(process.execPath, args, {
       cwd,
       env: childEnv(astraworkToken),
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -125,7 +130,7 @@ function runCli({ cliPath, cwd, prompt, astraworkToken, timeoutMs, signal }) {
  * Một lượt judge cho một ticket. Trả về văn bản thô của model — phần bóc JSON
  * nằm ngoài, dùng chung cho cả hai backend.
  */
-async function judgeOnce({ backend, ticket, options, repoDir, config, timeoutMs, redact, job, log, stats, limiter, usage, index }) {
+async function judgeOnce({ backend, ticket, options, repoDir, config, timeoutMs, redact, job, log, stats, limiter, usage, index, aux, traceFile = '' }) {
   if (backend === 'none') {
     // Không có model nên không có gì để bóc: trả thẳng object đã dựng, nhưng nó
     // vẫn đi qua `pickItem` như hai backend kia để không có đường nào lách được
@@ -144,17 +149,38 @@ async function judgeOnce({ backend, ticket, options, repoDir, config, timeoutMs,
       astraworkToken: job.astraworkToken,
       timeoutMs,
       signal: job.abort?.signal,
+      traceFile,
     });
     if (res.timedOut) throw new Error(`Ticket "${ticket.key}": CLI quá ${Math.round(timeoutMs / 1000)}s, đã bị dừng.`);
     // Agent tự quyết đọc file nào bằng tool của nó; server không có bản ghi phép
     // quét ấy. Bịa một con số ở đây là tệ hơn nói không biết.
-    return { text: res.stdout, scan: null, note: `CLI thoát với mã ${res.code}`, stderr: res.stderr };
+    let traceRef = '';
+    if (traceFile) {
+      try {
+        await fs.access(traceFile);
+        traceRef = path.relative(config.runsDir, traceFile).replace(/\\/g, '/');
+      } catch {
+        // A trace is supplementary provenance, never a fabricated artifact.
+        log(`CLI ${ticket.key}: trace không được tạo; không gắn trace_ref.`);
+      }
+    }
+    return {
+      text: res.stdout,
+      scan: null,
+      note: `CLI thoát với mã ${res.code}`,
+      stderr: res.stderr,
+      ...(traceRef ? { trace_ref: traceRef } : {}),
+    };
   }
 
-  if (!fciConfigured(config)) {
-    throw new Error('Backend "fci" chưa cấu hình: cần FPT_BASE_URL, FPT_API_KEY và FPT_MODEL.');
-  }
-  const ctx = await buildRepoContext({ repoDir, ticket, excludeGlobs: options.exclude_globs });
+  // Trần bằng chứng của bên gọi là SÀN của ngữ cảnh: xin 20 bằng chứng mà chỉ
+  // được xem 8 file thì cái trần ấy vô nghĩa.
+  const ctx = buildRepoContext({
+    index,
+    ticket,
+    aux,
+    maxFiles: Math.max(MIN_CONTEXT_FILES, Number(options.max_files_per_ticket) || 0),
+  });
   const prompt = buildJudgePrompt({
     ticket,
     options,
@@ -182,12 +208,33 @@ async function judgeOnce({ backend, ticket, options, repoDir, config, timeoutMs,
       },
     }),
   );
-  // `buildRepoContext` có đi hết corpus, nhưng thứ MODEL nhìn thấy chỉ là cây
-  // file đã cắt còn `maxTreeFiles` và tối đa `maxSnippets` dòng khớp. Verdict
-  // do model ra, không do phép quét ấy ra — nên báo `files_scanned` ở đây sẽ
-  // khiến AstraQA đọc một ticket evidence rỗng thành JIRA_AHEAD chỉ vì model
-  // chưa được cho xem đúng file. Đó chính là kiểu dương tính giả cần tránh.
-  return { text, scan: null, note: `FCI ${config.fciModel}`, usage: tokenUsage, stderr: '' };
+  /*
+   * Bản ghi quét, và giờ nó là bản ghi THẬT.
+   *
+   * Trước đây chỗ này trả `scan: null` với lý do: model có thể chưa được cho
+   * xem đúng file, nên báo `files_scanned` sẽ khiến AstraQA đọc một ticket
+   * evidence rỗng thành JIRA_AHEAD. Lý do ấy đúng khi ngữ cảnh do một bộ tách
+   * từ riêng gom lại — nhưng từ khi `repoContext` dùng chính `queryTerms`/
+   * `normalizedKey` của spec, phạm vi tìm của `fci` và của `none` là MỘT.
+   * Giấu nó đi bây giờ chỉ làm mất một bằng chứng âm có thật.
+   *
+   * `complete` vẫn là cái chốt: quét chưa đi hết repo (đụng trần, lỗi đọc,
+   * file quá lớn) thì AstraQA không được phép suy ra JIRA_AHEAD — cùng một
+   * luật đang áp cho `none`.
+   *
+   * Index rỗng thì `scan` là `null`, y hệt `none`: thà nói "không biết" còn
+   * hơn báo `files_scanned: 0` trông như một phép quét đã chạy xong và không
+   * thấy gì.
+   */
+  return {
+    text,
+    scan: index.N > 0
+      ? { files_scanned: index.N, terms: ctx.keywords, complete: index.complete === true, omitted: index.omitted }
+      : null,
+    note: `FCI ${config.fciModel} — ${ctx.candidates} file ứng viên, ${ctx.snippets.length} dòng trích`,
+    usage: tokenUsage,
+    stderr: '',
+  };
 }
 
 /** `src/a.ts:120-148` → {path, lines}. Model hay gộp như vậy dù schema tách hai field. */
@@ -254,6 +301,12 @@ export async function keepRealEvidence(evidence, repoDir, options) {
     }
     let stat;
     try {
+      const real = await fs.realpath(abs);
+      const realRepo = await fs.realpath(repoDir);
+      if (real !== realRepo && !real.startsWith(realRepo + path.sep)) {
+        drop('symlink points outside repo');
+        continue;
+      }
       stat = await fs.stat(abs);
     } catch {
       drop('không tồn tại trong repo');
@@ -304,6 +357,27 @@ export async function keepRealEvidence(evidence, repoDir, options) {
   return { evidence: kept, dropped, clamped };
 }
 
+/** A link is a source reference to the ticket key, not proof that the AC passed. */
+async function mappingState(ticket, evidence, repoDir) {
+  if (!evidence.length) return 'unlinked';
+  const key = String(ticket.key ?? '').toLowerCase();
+  for (const citation of evidence) {
+    if (!citation.lines) continue;
+    const match = /^(\d+)(?:-(\d+))?$/.exec(citation.lines);
+    if (!match) continue;
+    try {
+      const lines = (await fs.readFile(path.resolve(repoDir, citation.path), 'utf8')).split(/\r?\n/);
+      const start = Number(match[1]);
+      const end = Number(match[2] || match[1]);
+      if (lines.slice(start - 1, end).some((line) => line.toLowerCase().includes(key))) return 'linked';
+    } catch {
+      // The citation validator already ran; a later read failure can only
+      // lower this to a weak link, never manufacture a strong one.
+    }
+  }
+  return 'weak_link';
+}
+
 function buildReportMd({ runId, generatedAt, backend, repoUrl, ref, head, items, tickets, droppedByKey, clampedByKey, failedByKey, stats, diff, warnings = [] }) {
   const byKey = new Map(tickets.map((t) => [t.key, t]));
   const count = (s) => items.filter((i) => i.code_status === s).length;
@@ -323,6 +397,12 @@ function buildReportMd({ runId, generatedAt, backend, repoUrl, ref, head, items,
     out.push(
       `- tickets_subset: xin ${stats.tickets_subset} key, quét ${stats.tickets_total - stats.tickets_out_of_subset}` +
         `, để nguyên ${stats.tickets_out_of_subset} ticket (\`not_in_subset\`)`,
+    );
+  }
+  if (stats.tickets_cancelled) {
+    out.push(
+      `- **job bị gọi dừng**: ${stats.tickets_cancelled}/${stats.tickets_total} ticket chưa được xét (\`cancelled\`) ` +
+        '— chưa xét, không phải đã xét rồi thấy thiếu',
     );
   }
   out.push(`- tickets: ${items.length} — done ${count('done')}, partial ${count('partial')}, missing ${count('missing')}`);
@@ -372,6 +452,14 @@ function buildReportMd({ runId, generatedAt, backend, repoUrl, ref, head, items,
       if (t?.status) out.push(`- trạng thái do nguồn ngoài báo: ${t.status}`);
       out.push('');
       out.push('- _`missing` ở đây nghĩa là "không được xét lần này", không phải "đã kiểm tra và thấy thiếu"._');
+      out.push('');
+      continue;
+    }
+    if (it.reason === 'cancelled') {
+      out.push('- **KHÔNG XÉT** — job bị gọi dừng trước khi tới ticket này.');
+      if (t?.status) out.push(`- trạng thái do nguồn ngoài báo: ${t.status}`);
+      out.push('');
+      out.push('- _`missing` ở đây nghĩa là "chưa xét", không phải "đã kiểm tra và thấy thiếu"._');
       out.push('');
       continue;
     }
@@ -457,12 +545,19 @@ export async function runAnalyzeJob({ job, body, config, redact, log, limiter = 
 
   const backend = ['cli', 'fci', 'none'].includes(body.backend) ? body.backend : config.judgeBackend;
 
-  // Tách ticket TRƯỚC khi clone: tickets_md hỏng thì không việc gì phải kéo cả
+  // Tách ticket TRƯỚC khi clone: input hỏng thì không việc gì phải kéo cả
   // một repo về rồi mới báo lỗi.
   const { tickets, source: ticketSource } = resolveTickets(body);
   // Thiếu thì là 1; khác 1 thì `parseSchemaVersion` ném — và route đã chặn
   // trước đó, nên tới đây ném là chuyện của một client gọi thẳng hàm này.
   const schemaVersion = parseSchemaVersion(body.tickets_schema_version);
+
+  // Cùng một lý do, cho cấu hình: bản trước kiểm `fciConfigured` bên trong
+  // từng lượt, nên một biến môi trường thiếu thành 184 lượt hỏng giống hệt
+  // nhau sau khi đã clone xong. `judge.mjs` kiểm trước; ở đây cũng vậy.
+  if (backend === 'fci' && !fciConfigured(config)) {
+    throw new Error('Backend "fci" chưa cấu hình: cần FPT_BASE_URL, FPT_API_KEY và FPT_MODEL.');
+  }
 
   /**
    * Trần số ticket được chấm trong MỘT job. `0` = không giới hạn.
@@ -515,7 +610,30 @@ export async function runAnalyzeJob({ job, body, config, redact, log, limiter = 
   const repoDir = path.join(config.workspaceDir, job.id, 'repo');
   await fs.mkdir(repoDir, { recursive: true });
 
-  job.progress = { done: 0, total: tickets.length };
+  /*
+   * Tiến độ đếm VIỆC PHẢI LÀM, không phải số dòng trong bảng.
+   *
+   * Bản trước đặt `total` bằng số ticket gửi lên. Ðo trên lần chạy thật: một
+   * request gửi 184 ticket kèm `tickets_subset` 8 key báo về
+   * `{"done":1,"total":184}` — người ngồi xem tưởng còn 183 lượt nữa, trong khi
+   * chỉ có 8 lượt phải chạy. `judge.mjs` đã giải đúng bài này cho chính nó
+   * ("total là số lượt THẬT SỰ gọi model"); ở đây làm theo.
+   *
+   * Bốn ô còn lại nói vì sao `total` nhỏ hơn `tickets`, để bên gọi không phải
+   * tự trừ: ticket ngoài tập con, ticket vượt trần, và ticket bị cắt vì gọi dừng.
+   */
+  const counted = {
+    done: 0,
+    total: toJudge.length,
+    tickets: tickets.length,
+    not_in_subset: outOfSubset.length,
+    skipped_quota_limit: skipped.length,
+    cancelled: 0,
+  };
+  const publish = () => {
+    job.progress = { ...counted };
+  };
+  publish();
   job.astraworkToken = body.astrawork_token || config.astraworkJwt || '';
   const startedAt = Date.now();
   const stats = {
@@ -533,6 +651,9 @@ export async function runAnalyzeJob({ job, body, config, redact, log, limiter = 
     items_with_assessment: 0,
     ac_evidence_dropped: 0,
     tickets_skipped: skipped.length,
+    // Ticket chưa tới lượt vì job bị gọi dừng. Tách khỏi `tickets_skipped`
+    // (vượt trần) vì hai chuyện khác nhau và bên gọi xử lý khác nhau.
+    tickets_cancelled: 0,
     max_tickets: maxTickets,
     // Bên gọi xin bao nhiêu, khớp bao nhiêu, còn lại bao nhiêu không quét.
     // `null` = không gửi `tickets_subset`, khác với "gửi nhưng không khớp ai".
@@ -605,16 +726,53 @@ export async function runAnalyzeJob({ job, body, config, redact, log, limiter = 
      * tính được từ một lượt quét riêng của một ticket. (Bản cũ quét lại cả repo
      * cho từng ticket — 184 ticket là 184 lần đi cây thư mục.)
      *
-     * Chỉ backend `none` cần; `fci` và `cli` để model/agent tự tìm.
+     * `none` và `fci` đều cần: một bên dựng bằng chứng từ nó, một bên dựng
+     * ngữ cảnh cho model từ nó. Chỉ `cli` không cần — agent tự duyệt repo
+     * bằng tool của nó.
      */
     let index = null;
-    if (backend === 'none') {
+    if (backend !== 'cli') {
       const tIndex = Date.now();
       index = await buildIndex({ repoDir, fs, path, excludeGlobs: effective.exclude_globs, matchesAny });
       log(`index: ${index.N} file, ${index.df.size} term khác nhau, dựng trong ${Date.now() - tIndex}ms`);
     }
 
-    for (const ticket of toJudge) {
+    /*
+     * Corpus phụ, cũng dựng ÐÚNG MỘT LẦN, và chỉ cho `fci`.
+     *
+     * `none` không dùng: bằng chứng của nó phải đến từ đúng phép quét đã đóng
+     * băng, không được lấy từ một tập file khác. `cli` không cần: agent đọc
+     * được cả repo bằng tool của nó.
+     */
+    let aux = null;
+    if (backend === 'fci') {
+      const tAux = Date.now();
+      aux = await buildAuxCorpus({ repoDir, fs, path, excludeGlobs: effective.exclude_globs, matchesAny });
+      log(`corpus phụ (hạ tầng/cấu hình, ngoài allowlist): ${aux.N} file, dựng trong ${Date.now() - tAux}ms`);
+    }
+
+    /** Ticket chưa tới lượt vì job bị gọi dừng giữa chừng. */
+    const cancelled = [];
+
+    for (let at = 0; at < toJudge.length; at++) {
+      const ticket = toJudge[at];
+      /*
+       * Kiểm ở ÐẦU mỗi lượt, không chỉ trong `runCli`/`askFci`.
+       *
+       * Hai backend kia cắt được lượt đang bay bằng `signal`, nhưng backend
+       * `none` không gọi ai cả — không có chỗ nào cho signal chạm vào, nên
+       * một lệnh dừng sẽ chỉ có hiệu lực sau khi quét nốt cả 184 ticket. Và
+       * ngay cả với `fci`, lượt sau vẫn được gửi nếu không kiểm ở đây.
+       */
+      if (job.abort?.signal?.aborted) {
+        cancelled.push(...toJudge.slice(at));
+        stats.tickets_cancelled += cancelled.length;
+        counted.cancelled += cancelled.length;
+        counted.total -= cancelled.length;
+        publish();
+        log(`đã dừng theo yêu cầu ở ticket thứ ${at + 1}/${toJudge.length} — ${cancelled.length} ticket còn lại KHÔNG được xét.`);
+        break;
+      }
       job.current = ticket.key;
       const ticketStartedAt = Date.now();
 
@@ -628,8 +786,12 @@ export async function runAnalyzeJob({ job, body, config, redact, log, limiter = 
        */
       let item;
       try {
+        // Ticket keys are request input, so use an ordinal for the filename.
+        const traceFile = backend === 'cli'
+          ? path.join(config.runsDir, 'traces', job.id, `${items.length + 1}.jsonl`)
+          : '';
         const res = await judgeOnce({
-          backend, ticket, options: effective, repoDir, config, timeoutMs, redact, job, log, stats, limiter, usage, index,
+          backend, ticket, options: effective, repoDir, config, timeoutMs, redact, job, log, stats, limiter, usage, index, aux, traceFile,
         });
 
         let parsed;
@@ -642,7 +804,8 @@ export async function runAnalyzeJob({ job, body, config, redact, log, limiter = 
           );
         }
 
-        item = pickItem(parsed, ticket.key, { acceptanceCriteria: ticket.acceptance_criteria });
+        item = pickItem(parsed, ticket.key);
+        if (res.trace_ref) item.agent_trace = { schema_version: 1, ref: res.trace_ref };
         // `pickItem` chỉ trả về đúng năm field cũ, nên `scan` gắn vào ở đây.
         // Bắt buộc có mặt ở MỌI item — `null` là một câu trả lời hợp lệ ("không
         // biết"), còn thiếu field thì client không phân biệt được với `null`.
@@ -650,11 +813,25 @@ export async function runAnalyzeJob({ job, body, config, redact, log, limiter = 
         stats.judge_parsed += 1;
       } catch (err) {
         const why = redact(err instanceof Error ? err.message : String(err));
-        stats.judge_failed += 1;
-        failedByKey.set(ticket.key, why);
+        /*
+         * Lượt ÐANG BAY lúc có lệnh dừng không phải một lượt hỏng.
+         *
+         * `abort` giết tiến trình con và cắt request HTTP, nên nó rơi xuống
+         * đây kèm một message nghe như sự cố hạ tầng ("CLI thoát với mã null",
+         * "The operation was aborted"). Ghi nó thành `judge_failed` là nói
+         * "đã thử và hỏng" về một việc mà người trực vừa chủ động dừng — bên
+         * gọi sẽ đi tìm một sự cố không tồn tại, và `stats.judge_failed` thì
+         * đếm lẫn hai chuyện khác hẳn nhau.
+         */
+        const boDung = Boolean(job.abort?.signal?.aborted);
+        if (boDung) stats.tickets_cancelled += 1;
+        else {
+          stats.judge_failed += 1;
+          failedByKey.set(ticket.key, why);
+        }
         log(
           `[${items.length + 1}/${toJudge.length}] ${ticket.key} | ${Date.now() - ticketStartedAt}ms | ` +
-            `LƯỢT HỎNG — ${why}`,
+            (boDung ? `BỊ CẮT GIỮA LƯỢT vì có lệnh dừng — ${why}` : `LƯỢT HỎNG — ${why}`),
         );
         // `missing` + confidence 0 là cách trung thực nhất để nói "không chấm
         // được": không bịa kết luận, mà cũng không im lặng bỏ ticket khỏi báo cáo.
@@ -663,19 +840,38 @@ export async function runAnalyzeJob({ job, body, config, redact, log, limiter = 
           code_status: 'missing',
           confidence: 0,
           evidence: [],
-          reason: `judge_failed: ${why}`,
+          reason: boDung ? 'cancelled' : `judge_failed: ${why}`,
           // Lượt hỏng nghĩa là chưa quét được gì — `null`, không phải 0.
           scan: null,
+          assessment: notAssessed(ticket),
+          mapping_state: 'unlinked',
         });
         stats.items_without_scan += 1;
         droppedByKey.set(ticket.key, []);
         clampedByKey.set(ticket.key, []);
-        job.progress = { done: items.length, total: tickets.length };
+        // Lượt bị cắt giữa chừng không phải việc đã làm xong.
+        if (boDung) counted.cancelled += 1;
+        else counted.done += 1;
+        publish();
         continue;
       }
 
       const { evidence, dropped, clamped } = await keepRealEvidence(item.evidence, repoDir, effective);
       item.evidence = evidence;
+      item.mapping_state = await mappingState(ticket, evidence, repoDir);
+      /*
+       * Phạm vi quét của LƯỢT NÀY, để `assessment` biết một `not_satisfied`
+       * có đáng tin không (xem `assessment.mjs`).
+       *
+       * Hai đường được tính là đã đi tìm: một bản ghi quét đầy đủ (`none`,
+       * `fci`), hoặc một phiên agent đã tự duyệt repo và để lại trace (`cli`).
+       * Không có gì trong hai thứ đó thì "không thấy" chỉ là "chưa nhìn".
+       */
+      const coverage = item.scan?.complete === true || Boolean(item.agent_trace);
+      item.assessment = await normalizeAssessment({
+        raw: item.ac_assessment, ticket, repoDir, options: effective, validateEvidence: keepRealEvidence, coverage,
+      });
+      delete item.ac_assessment;
       droppedByKey.set(item.key, dropped);
       clampedByKey.set(item.key, clamped);
       stats.evidence_kept += evidence.length;
@@ -696,7 +892,7 @@ export async function runAnalyzeJob({ job, body, config, redact, log, limiter = 
        * ở đầu bên kia, áp sẵn ở đây để hai bên không nói khác nhau về cùng một
        * tiêu chí.
        */
-      if (item.assessment) {
+      if (item.assessment?.criteria?.length) {
         for (const c of item.assessment.criteria) {
           if (!c.evidence.length) continue;
           const kept = await keepRealEvidence(c.evidence, repoDir, effective);
@@ -719,31 +915,43 @@ export async function runAnalyzeJob({ job, body, config, redact, log, limiter = 
 
       stats[item.scan ? 'items_with_scan' : 'items_without_scan'] += 1;
       items.push(item);
-      job.progress = { done: items.length, total: tickets.length };
+      counted.done += 1;
+      publish();
     }
 
     // Ticket vượt trần vẫn có mặt trong báo cáo, chỉ nói rõ là chưa xét. Bỏ hẳn
-    // chúng khỏi `items` sẽ khiến AstraQA tưởng `tickets_md` chỉ có bấy nhiêu.
+    // chúng khỏi `items` sẽ khiến AstraQA tưởng input chỉ có bấy nhiêu.
     // Ticket ngoài `tickets_subset` cũng vậy, chỉ khác lý do.
-    for (const ticket of [...skipped, ...outOfSubset]) {
+    const leftovers = [
+      ...skipped.map((t) => [t, 'skipped_quota_limit']),
+      ...outOfSubset.map((t) => [t, 'not_in_subset']),
+      ...cancelled.map((t) => [t, 'cancelled']),
+    ];
+    for (const [ticket, reason] of leftovers) {
       items.push({
         key: ticket.key,
         code_status: 'missing',
         confidence: 0,
         evidence: [],
-        reason: skipped.includes(ticket) ? 'skipped_quota_limit' : 'not_in_subset',
+        reason,
         // Chưa xét lần nào thì cũng chưa quét lần nào.
         scan: null,
+        assessment: notAssessed(ticket),
+        mapping_state: 'unlinked',
       });
       stats.items_without_scan += 1;
       droppedByKey.set(ticket.key, []);
       clampedByKey.set(ticket.key, []);
-      job.progress = { done: items.length, total: tickets.length };
     }
+    publish();
 
     // Không lượt nào chấm được thì đừng trả về một bảng toàn `missing`: AstraQA
     // sẽ đọc nó thành "cả repo chưa làm gì". Hỏng hết là hỏng job, nói thẳng.
-    if (toJudge.length > 0 && stats.judge_parsed === 0) {
+    // Job bị gọi dừng thì hai cái chốt dưới đây không áp: chúng bắt "chạy hết
+    // mà không ra gì", còn đây là "được bảo dừng". Ném ở đây sẽ biến một lệnh
+    // dừng thành một job `failed`, và vứt luôn phần đã chấm xong.
+    const stopped = Boolean(job.abort?.signal?.aborted);
+    if (!stopped && toJudge.length > 0 && stats.judge_parsed === 0) {
       throw new Error(
         `Không lượt judge nào thành công (${stats.judge_failed}/${toJudge.length} ticket hỏng). ` +
           `Lỗi đầu tiên: ${failedByKey.values().next().value ?? 'không rõ'}`,
@@ -755,7 +963,7 @@ export async function runAnalyzeJob({ job, body, config, redact, log, limiter = 
     // NO_EVIDENCE hàng loạt, và không có dòng nào nói rằng chỗ hỏng là bộ lọc.
     // Ca đã gặp: WORKSPACE_DIR tương đối → repoDir tương đối → mọi path bị coi
     // là "thoát khỏi repo". Lỗi thì hiện lỗi, không bao giờ trả bảng rỗng im lặng.
-    if (stats.evidence_kept === 0 && stats.evidence_dropped > 0) {
+    if (!stopped && stats.evidence_kept === 0 && stats.evidence_dropped > 0) {
       throw new Error(
         `Bộ lọc bằng chứng loại toàn bộ ${stats.evidence_dropped}/${stats.evidence_dropped} mảnh — ` +
           `kiểm WORKSPACE_DIR/repoDir (repoDir="${repoDir}", tuyệt đối=${path.isAbsolute(repoDir)}).`,

@@ -17,72 +17,22 @@ export const ITEM_SCHEMA_TEXT = `\`\`\`json
       "evidence": [
         { "path": "<đường dẫn TƯƠNG ĐỐI trong repo>", "lines": "120-148", "note": "<vì sao đoạn này là bằng chứng>" }
       ],
-      "reason": "<matched_by_key | matched_by_summary | ...>"
-    }
-  ]
-}
-\`\`\``;
-
-/**
- * Schema khi ticket có tiêu chí chấp nhận: thêm `assessment`, một mục cho MỘT
- * tiêu chí.
- *
- * `id` là số thứ tự của tiêu chí trong danh sách bên trên, không phải số model
- * tự đặt: bên nhận gộp kết quả của nhiều repo theo đúng `id` ấy, nên một `id`
- * lệch là hai kết luận về hai tiêu chí khác nhau bị chồng lên nhau.
- *
- * Từ vựng `satisfied | partial | not_satisfied | unknown` là của AstraQA
- * (`code_reconcile.AC_STATUSES`), khai nguyên văn ở đây để không có bảng dịch
- * nào ở giữa.
- */
-export const ASSESSMENT_SCHEMA_TEXT = `\`\`\`json
-{
-  "items": [
-    {
-      "key": "<đúng ticket key ở trên>",
-      "code_status": "done | partial | missing",
-      "confidence": 0.0,
-      "evidence": [
-        { "path": "<đường dẫn TƯƠNG ĐỐI trong repo>", "lines": "120-148", "note": "<vì sao đoạn này là bằng chứng>" }
-      ],
       "reason": "<matched_by_key | matched_by_summary | ...>",
-      "assessment": {
-        "criteria": [
-          {
-            "id": 1,
-            "status": "satisfied | partial | not_satisfied | unknown",
-            "evidence": [
-              { "path": "<đường dẫn có thật>", "lines": "120-148", "note": "<dòng nào thoả tiêu chí này>" }
-            ],
-            "reason": "<một câu: vì sao tiêu chí này ở trạng thái đó>"
-          }
-        ]
-      }
+      "ac_assessment": [
+        { "id": 1, "status": "satisfied | partial | not_satisfied | unknown", "evidence": [{ "path": "src/example.ts", "lines": "10-20", "note": "implementation" }], "reason": "<how this criterion is or is not met>" }
+      ]
     }
   ]
 }
 \`\`\``;
-
-/** Khối "Tiêu chí chấp nhận" — mỗi tiêu chí một dòng, đánh số đúng bằng `id`. */
-export function acceptanceBlock(criteria = []) {
-  if (!Array.isArray(criteria) || criteria.length === 0) return '';
-  return ['Tiêu chí chấp nhận (mỗi dòng một tiêu chí, số đầu dòng là "id" phải dùng lại trong "assessment"):']
-    .concat(criteria.map((text, i) => `${i + 1}. ${String(text).replace(/\s*\n\s*/g, ' ')}`))
-    .join('\n');
-}
-
-/** Hướng dẫn thêm, chỉ gắn khi ticket thật sự có tiêu chí. */
-const ACCEPTANCE_RULES = [
-  '- Ticket này có danh sách tiêu chí chấp nhận. Ngoài kết luận chung, chấm TỪNG tiêu chí',
-  '  trong "assessment.criteria": một mục cho một tiêu chí, "id" đúng bằng số thứ tự ở trên.',
-  '- "satisfied" = code thoả tiêu chí ấy và bạn chỉ được ra chỗ thoả. "partial" = thoả một',
-  '  phần. "not_satisfied" = đã tìm và thấy chưa có. "unknown" = không đủ căn cứ để nói.',
-  '- Mỗi tiêu chí KHÁC "unknown" phải kèm ít nhất một bằng chứng có đường dẫn VÀ khoảng dòng.',
-  '  Không có chỗ để chỉ thì trạng thái là "unknown" — đó là câu trả lời hợp lệ.',
-].join('\n');
 
 /** Câu chốt bắt buộc, hợp đồng quy định nguyên văn. */
 export const SCHEMA_TAIL = 'Trả lời CHỈ bằng một khối ```json đúng schema sau, không giải thích gì thêm:';
+
+const AC_RULES = `For every supplied acceptance criterion, return exactly one ac_assessment entry with its 1-based id.
+Use satisfied only when a cited source line directly supports it; partial when cited code supports only part.
+Use unknown when the repository evidence is inconclusive. Do not infer passing tests from test files or from Jira status.
+If no acceptance criteria were supplied, return ac_assessment: [].`;
 
 const DEFAULT_BODY = `Bạn đang đứng ở thư mục gốc của một repo đã được clone sẵn. Nhiệm vụ: xác định phần code
 tương ứng với ticket dưới đây ĐÃ được hiện thực hay chưa.
@@ -106,23 +56,10 @@ function ticketBlock(ticket) {
     ticket.title ? `Ticket title: ${ticket.title}` : '',
     ticket.status ? `Ticket status (nguồn ngoài, chỉ để tham khảo): ${ticket.status}` : '',
     ticket.body ? `Mô tả ticket:\n${ticket.body}` : '',
-    acceptanceBlock(ticket.acceptance_criteria),
+    ticket.acceptance_criteria?.length ? `Acceptance criteria (IDs start at 1):\n${ticket.acceptance_criteria.map((criterion, index) => `${index + 1}. ${criterion}`).join('\n')}` : '',
   ]
     .filter(Boolean)
     .join('\n');
-}
-
-/** Ticket có tiêu chí thì prompt đổi cả phần luật lẫn phần schema. */
-function schemaFor(ticket) {
-  return Array.isArray(ticket.acceptance_criteria) && ticket.acceptance_criteria.length
-    ? ASSESSMENT_SCHEMA_TEXT
-    : ITEM_SCHEMA_TEXT;
-}
-
-function rulesFor(ticket, head) {
-  return Array.isArray(ticket.acceptance_criteria) && ticket.acceptance_criteria.length
-    ? `${head}\n${ACCEPTANCE_RULES}`
-    : head;
 }
 
 /**
@@ -160,7 +97,7 @@ export function buildJudgePrompt({ ticket, options = {}, context, promptOverride
         exclude_globs: (options.exclude_globs ?? []).join(', ') || '(không có)',
       })[k] ?? m,
   );
-  return `${rulesFor(ticket, head)}\n\n--- NGỮ CẢNH REPO ---\n${context}\n--- HẾT NGỮ CẢNH ---\n\n${ticketBlock(ticket)}\n\n${SCHEMA_TAIL}\n${schemaFor(ticket)}\n`;
+  return `${head}\n\n${AC_RULES}\n\n--- NGỮ CẢNH REPO ---\n${context}\n--- HẾT NGỮ CẢNH ---\n\n${ticketBlock(ticket)}\n\n${SCHEMA_TAIL}\n${ITEM_SCHEMA_TEXT}\n`;
 }
 
 export function buildPrompt({ ticket, options = {}, promptOverride = null }) {
@@ -176,5 +113,5 @@ export function buildPrompt({ ticket, options = {}, promptOverride = null }) {
 
   const head = fill(typeof promptOverride === 'string' && promptOverride.trim() ? promptOverride : DEFAULT_BODY);
 
-  return `${rulesFor(ticket, head)}\n\n${ticketBlock(ticket)}\n\n${SCHEMA_TAIL}\n${schemaFor(ticket)}\n`;
+  return `${head}\n\n${AC_RULES}\n\n${ticketBlock(ticket)}\n\n${SCHEMA_TAIL}\n${ITEM_SCHEMA_TEXT}\n`;
 }

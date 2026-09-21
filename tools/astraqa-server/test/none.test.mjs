@@ -113,6 +113,7 @@ test('chạy trọn job mà không có key/JWT/CLI nào', async () => {
   assert.equal(hit.code_status, 'done');
   assert.equal(hit.confidence, 0.25);
   assert.equal(hit.reason, 'matched_by_key');
+  assert.equal(hit.mapping_state, 'linked');
   assert.ok(hit.evidence.length > 0);
   for (const ev of hit.evidence) {
     assert.ok(ev.path.endsWith('.py'), `chỉ file mã nguồn mới được trích: ${ev.path}`);
@@ -123,6 +124,7 @@ test('chạy trọn job mà không có key/JWT/CLI nào', async () => {
   assert.equal(miss.key, 'ZZZ-999');
   assert.equal(miss.code_status, 'missing');
   assert.equal(miss.reason, 'no_match');
+  assert.equal(miss.mapping_state, 'unlinked');
   assert.deepEqual(miss.evidence, []);
   // Ðây mới là lúc bản ghi quét quan trọng nhất: evidence rỗng mà ĐÃ quét thật.
   assert.ok(miss.scan, 'ticket không có evidence vẫn phải mang bản ghi quét');

@@ -262,18 +262,25 @@ function fromHeadings(lines, fenced) {
   }
   if (!heads.length) return [];
 
+  // Section headings inside tickets are repeated once per ticket. Counting them
+  // as ticket headings makes a normal AstraQA document parse as duplicate
+  // "description" / "acceptance criteria" tickets.
+  const sectionNames = new Set(['description', 'acceptance criteria']);
+  const ticketHeads = heads.filter((h) => !sectionNames.has(norm(h.text)));
+  if (!ticketHeads.length) return [];
+
   // Cấp "đông nhất" là cấp của ticket: `# Sprint 12` rồi N × `## KEY …` thì
   // ticket nằm ở cấp 2, không phải cấp 1.
   const count = new Map();
-  for (const h of heads) count.set(h.level, (count.get(h.level) ?? 0) + 1);
-  let level = heads[0].level;
+  for (const h of ticketHeads) count.set(h.level, (count.get(h.level) ?? 0) + 1);
+  let level = ticketHeads[0].level;
   for (const [lv, n] of [...count].sort((a, b) => b[1] - a[1] || a[0] - b[0])) {
     level = lv;
     void n;
     break;
   }
 
-  const picked = heads.filter((h) => h.level === level);
+  const picked = ticketHeads.filter((h) => h.level === level);
   const tickets = [];
   for (let i = 0; i < picked.length; i++) {
     const start = picked[i].line;
