@@ -32,7 +32,7 @@ export const CANONICAL_FORM = 'cjson/1';
  * Lớp khoảng trắng, viết thẳng ra thay vì dùng `\s`.
  *
  * `\s` của JavaScript và của Python KHÔNG cùng một tập: Python bắt `\x1c-\x1f`,
- * JavaScript thì không; JavaScript bắt `﻿`, Python thì không. Chênh nhau ở
+ * JavaScript thì không; JavaScript bắt `U+FEFF`, Python thì không. Chênh nhau ở
  * một codepoint là đủ để hai bên sinh ra hai `criterion_id` khác nhau cho cùng
  * một câu. Liệt kê tập ấy làm hai bản cài đặt bằng nhau theo cấu trúc.
  */

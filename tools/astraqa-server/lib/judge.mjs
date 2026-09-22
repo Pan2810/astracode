@@ -27,12 +27,12 @@
  */
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { cloneRepo } from './git.mjs';
+import { blobIds, cloneRepo } from './git.mjs';
 import { readGuidanceText } from './repoRules.mjs';
 import { buildVerdictPrompt } from './verdictPrompt.mjs';
 import { extractJsonBlock } from './jsonBlock.mjs';
 import { askFci, fciConfigured } from './fciJudge.mjs';
-import { openCache, cacheKey, CACHE_DIRNAME } from './judgeCache.mjs';
+import { openCache, cacheKey, cacheKeyV2, contentFingerprint, CACHE_DIRNAME } from './judgeCache.mjs';
 import { runCli } from './analyze.mjs';
 
 /**
@@ -164,9 +164,9 @@ export function parseSelection(body = {}) {
   return {
     mode: rawMode,
     skipAbove,
-    // Mặc định BẬT: khoá cache đã gồm cả revision, ticket, rules và model, nên
-    // một lần trúng là đúng câu hỏi ấy. Ðể mặc định tắt nghĩa là ai quên gửi
-    // `cache: true` thì trả tiền lại từ đầu.
+    // Mặc định BẬT: khoá cache đã gồm nội dung những tệp được dẫn ra, cùng
+    // ticket, rules và model, nên một lần trúng là đúng câu hỏi ấy. Ðể mặc
+    // định tắt nghĩa là ai quên gửi `cache: true` thì trả tiền lại từ đầu.
     cache: body.cache === undefined || body.cache === null ? true : body.cache,
     rulesVersion: String(body.rules_version ?? '').trim(),
     tenant: String(body.tenant ?? '').trim(),
@@ -317,15 +317,21 @@ export async function runJudgeJob({ job, body, config, redact, log, limiter, usa
    * tiến độ chạy tới 190 ở đó là thanh sai, và nó sai theo hướng khiến người
    * ngồi xem tưởng còn lâu mới xong.
    *
-   * Trước khi clone xong thì chưa biết cái nào trúng cache (khoá có revision),
-   * nên `total` khởi đầu bằng số ticket rồi được chỉnh lại đúng một lần, ngay
-   * sau khi phân loại.
+   * Trước khi clone xong thì chưa biết cái nào trúng cache (khoá có vân tay
+   * nội dung tệp), nên `total` khởi đầu bằng số ticket rồi được chỉnh lại đúng
+   * một lần, ngay sau khi phân loại.
+   *
+   * `cached` là TỔNG số lượt lấy từ cache — AstraQA đang đọc đúng tên đó, nên
+   * nó giữ nguyên nghĩa. `cached_v2` và `cached_legacy` chia tổng ấy ra theo
+   * phiên bản khoá đã đọc được, và cộng lại đúng bằng `cached`.
    */
   const counted = {
     done: 0,
     total: tickets.length,
     skipped: 0,
     cached: 0,
+    cached_v2: 0,
+    cached_legacy: 0,
     model_calls: 0,
     token_in: 0,
     token_out: 0,
@@ -348,6 +354,9 @@ export async function runJudgeJob({ job, body, config, redact, log, limiter, usa
     rules_version: selection.rulesVersion || null,
     skipped_sure: 0,
     cache_hits: 0,
+    cache_hits_v2: 0,
+    cache_hits_legacy: 0,
+    cache_upgrades: 0,
     cache_writes: 0,
     judged: 0,
     failed: 0,
@@ -392,9 +401,9 @@ export async function runJudgeJob({ job, body, config, redact, log, limiter, usa
       log,
     });
     /*
-     * Cache mở SAU khi clone, vì khoá có `revision` — và đó là cả điểm mạnh của
-     * nó: một commit mới là những khoá mới, nên cache không bao giờ trả lời
-     * thay cho code đã đổi.
+     * Cache mở SAU khi clone, vì khoá phải đọc nội dung tệp trong bản clone —
+     * và đó là cả điểm mạnh của nó: tệp đổi là khoá đổi, nên cache không bao
+     * giờ trả lời thay cho code đã đổi.
      */
     const cache = selection.cache
       ? await openCache({ dir: path.join(config.workspaceDir, CACHE_DIRNAME), tenant: selection.tenant, log })
@@ -413,7 +422,14 @@ export async function runJudgeJob({ job, body, config, redact, log, limiter, usa
       max_snippets: options.max_snippets,
       max_snippet_lines: options.max_snippet_lines,
     });
-    const keyFor = (ticket) =>
+    /*
+     * Khoá CŨ, giữ lại chỉ để tra cứu.
+     *
+     * Không còn dòng nào được ghi dưới khoá này nữa; nó tồn tại để những dòng
+     * đã nằm sẵn trên đĩa vẫn dùng được thêm đúng một lần, rồi được chép sang
+     * khoá mới. Ðụng vào công thức ở đây là làm mù cả cache cũ.
+     */
+    const legacyKeyFor = (ticket) =>
       cacheKey({
         repoUrl: body.repo_url,
         revision: head || '',
@@ -426,6 +442,68 @@ export async function runJudgeJob({ job, body, config, redact, log, limiter, usa
         prompt: JSON.stringify({ shape: promptShape, acceptance_criteria: ticket.acceptance_criteria,
           evidence: ticket.evidence, grep_verdict: ticket.grep_verdict, grep_reason: ticket.grep_reason }),
       });
+
+    /*
+     * Blob id của mọi tệp được dẫn ra trong cả job — một lần `git cat-file` cho
+     * tất cả, trước khi phân loại.
+     *
+     * Hỏng thì cache tắt đi cho lượt này chứ không làm hỏng job: không có vân
+     * tay nội dung thì không có khoá v2 nào đáng tin, và trả lời sai vì một
+     * khoá đoán mò thì tệ hơn nhiều so với trả tiền thêm một lần.
+     */
+    let oids = new Map();
+    let fingerprintsOk = Boolean(cache);
+    if (cache) {
+      try {
+        oids = await blobIds({
+          repoDir,
+          rev: head || 'HEAD',
+          paths: tickets.flatMap((t) => t.evidence.map((ev) => ev.path)),
+          timeoutMs: Math.min(timeoutMs, 120_000),
+        });
+      } catch (err) {
+        fingerprintsOk = false;
+        log(`cache judge: không lấy được blob id, bỏ qua cache lượt này — ${redact(String(err))}`);
+      }
+    }
+
+    /*
+     * Khoá MỚI: không có `repo_url`, không có `revision`, thay vào đó là vân
+     * tay nội dung của chính những tệp ticket dẫn ra. Xem `cacheKeyV2`.
+     */
+    const keyFor = (ticket) =>
+      cacheKeyV2({
+        ticketKey: ticket.key,
+        summary: ticket.summary,
+        description: ticket.description,
+        status: ticket.status,
+        rulesVersion: selection.rulesVersion,
+        model: config.fciModel,
+        // `evidence` KHÔNG vào vân tay prompt nữa: `lines`/`note` nằm trong đó,
+        // và giữ chúng lại thì vân tay nội dung không cứu được gì.
+        prompt: JSON.stringify({ shape: promptShape, acceptance_criteria: ticket.acceptance_criteria,
+          grep_verdict: ticket.grep_verdict, grep_reason: ticket.grep_reason }),
+        contentFp: contentFingerprint(ticket.evidence.map((ev) => ev.path), oids),
+      });
+
+    /*
+     * Phần đọc được bằng mắt của một dòng cache. `v: 2` là thứ duy nhất máy
+     * đọc: nó phân biệt dòng khoá mới với dòng khoá cũ khi đếm ở `/healthz`.
+     *
+     * `revision` vẫn ghi lại dù không còn nằm trong khoá — nó trả lời "dòng
+     * này sinh ra lúc nào" khi ai đó mở tệp cache ra xem, và đó là việc khác
+     * hẳn với việc quyết định dòng nào trúng.
+     */
+    const metaFor = (ticket) => ({
+      v: 2,
+      // Ði qua redactor: một `repo_url` có credential nhúng sẵn sẽ nằm lại
+      // trên đĩa rất lâu, khác với một dòng log bảy ngày.
+      repo_url: redact(body.repo_url),
+      revision: job.revision,
+      key: ticket.key,
+      rules_version: selection.rulesVersion || null,
+      model: config.fciModel,
+    });
 
     /*
      * Phân loại một lần, trước khi gửi lượt nào.
@@ -454,15 +532,40 @@ export async function runJudgeJob({ job, body, config, redact, log, limiter, usa
         });
         continue;
       }
-      const k = cache ? keyFor(ticket) : null;
-      const hit = k ? cache.get(k) : null;
+      const k = cache && fingerprintsOk ? keyFor(ticket) : null;
+      /*
+       * Tra hai lần: khoá mới trước, khoá cũ sau.
+       *
+       * Ðổi công thức khoá mà không có bước thứ hai này thì ngày đổi là ngày
+       * cả cache thành rác — 164 dòng đã trả tiền để có nằm im trên đĩa trong
+       * khi job hỏi lại model đúng 164 câu ấy. Một lần trúng khoá cũ được chép
+       * ngay sang khoá mới (append, không xoá dòng nào), nên chuyện này chỉ
+       * xảy ra một lần cho mỗi ticket.
+       */
+      let hit = k ? cache.get(k) : null;
+      let via = hit ? 'v2' : null;
+      let upgrade = false;
+      if (!hit && cache) {
+        hit = cache.get(legacyKeyFor(ticket));
+        if (hit) {
+          via = 'legacy';
+          upgrade = Boolean(k);
+        }
+      }
       if (hit) {
         stats.cache_hits += 1;
+        stats[via === 'v2' ? 'cache_hits_v2' : 'cache_hits_legacy'] += 1;
         counted.cached += 1;
+        counted[via === 'v2' ? 'cached_v2' : 'cached_legacy'] += 1;
+        if (upgrade) {
+          stats.cache_upgrades += 1;
+          await cache.put(k, metaFor(ticket), hit);
+        }
         // `cached: true` đi kèm để bên gọi phân biệt được "model vừa nói thế"
-        // với "model đã nói thế trên đúng commit này" — cùng một kết luận,
-        // nhưng không cùng một lần xét.
-        job.results.push({ ...hit, cached: true });
+        // với "model đã nói thế trên đúng đoạn code này" — cùng một kết luận,
+        // nhưng không cùng một lần xét. `cache_hit` nói tiếp: đọc bằng khoá nào.
+        job.results.push({ ...hit, cached: true, cache_hit: via });
+        log(`${ticket.key} | cache=${via}${upgrade ? ' (chép sang khoá v2)' : ''} | ${hit.verdict ?? hit.error ?? '(không rõ)'}`);
         continue;
       }
       pending.push({ ticket, cacheKeyOf: k });
@@ -479,7 +582,9 @@ export async function runJudgeJob({ job, body, config, redact, log, limiter, usa
       `chọn lọc: mode ${selection.mode}` +
         (selection.skipAbove === null ? '' : ` (skip_above ${selection.skipAbove})`) +
         ` | cache ${cache ? `bật, tenant ${cache.tenant}, ${cache.loaded} entry` : 'tắt'}` +
-        ` → ${stats.skipped_sure} đã chắc ở tầng grep, ${stats.cache_hits} trúng cache, ` +
+        ` → ${stats.skipped_sure} đã chắc ở tầng grep, ` +
+        `${stats.cache_hits} trúng cache (${stats.cache_hits_v2} khoá v2, ${stats.cache_hits_legacy} khoá cũ` +
+        `${stats.cache_upgrades ? `, ${stats.cache_upgrades} dòng vừa chép sang v2` : ''}), ` +
         `${pending.length} lượt phải gọi model`,
     );
 
@@ -496,7 +601,7 @@ export async function runJudgeJob({ job, body, config, redact, log, limiter, usa
             skipped.length > 0
               ? `không đọc được mảnh nào: ${skipped.map((s) => `${s.path} (${s.why})`).join('; ')}`
               : 'ticket không có dẫn chứng nào để đọc';
-          log(`${ticket.key} | ${Date.now() - at}ms | GIỮ TẦNG GREP — ${why}`);
+          log(`${ticket.key} | ${Date.now() - at}ms | cache=miss | GIỮ TẦNG GREP — ${why}`);
           return { key: ticket.key, tier: 'grep', error: why };
         }
 
@@ -566,31 +671,19 @@ export async function runJudgeJob({ job, body, config, redact, log, limiter, usa
         stats.judged += 1;
         if (cache && cacheKeyOf) {
           // Chỉ lưu lượt THÀNH CÔNG. Một lỗi mạng được cache lại sẽ thành kết
-          // luận vĩnh viễn cho ticket ấy trên commit ấy.
+          // luận vĩnh viễn cho ticket ấy trên đoạn code ấy.
           stats.cache_writes += 1;
-          await cache.put(
-            cacheKeyOf,
-            {
-              // Ði qua redactor: một `repo_url` có credential nhúng sẵn sẽ nằm
-              // lại trên đĩa rất lâu, khác với một dòng log bảy ngày.
-              repo_url: redact(body.repo_url),
-              revision: job.revision,
-              key: ticket.key,
-              rules_version: selection.rulesVersion || null,
-              model: config.fciModel,
-            },
-            out,
-          );
+          await cache.put(cacheKeyOf, metaFor(ticket), out);
         }
         log(
-          `${ticket.key} | ${Date.now() - at}ms | ${ticket.grep_verdict || '(grep chưa nói)'} → ${out.verdict} ` +
+          `${ticket.key} | ${Date.now() - at}ms | cache=miss | ${ticket.grep_verdict || '(grep chưa nói)'} → ${out.verdict} ` +
             `(confidence ${out.confidence === null ? '?' : out.confidence.toFixed(2)}) | ${snippets.length} mảnh code`,
         );
         return out;
       } catch (err) {
         const why = redact(err instanceof Error ? err.message : String(err));
         stats.failed += 1;
-        log(`${ticket.key} | ${Date.now() - at}ms | LƯỢT HỎNG, giữ tầng grep — ${why}`);
+        log(`${ticket.key} | ${Date.now() - at}ms | cache=miss | LƯỢT HỎNG, giữ tầng grep — ${why}`);
         return { key: ticket.key, tier: 'grep', error: why };
       }
     };
@@ -640,7 +733,8 @@ export async function runJudgeJob({ job, body, config, redact, log, limiter, usa
     stats.cancelled = Boolean(job.abort?.signal?.aborted);
     log(
       `job judge xong${stats.cancelled ? ' (đã dừng theo yêu cầu)' : ''}: ${stats.judged} chấm lại, ` +
-        `${stats.cache_hits} lấy từ cache, ${stats.skipped_sure} bỏ qua vì đã chắc, ` +
+        `${stats.cache_hits} lấy từ cache (v2 ${stats.cache_hits_v2} / cũ ${stats.cache_hits_legacy}), ` +
+        `${stats.skipped_sure} bỏ qua vì đã chắc, ` +
         `${stats.failed} hỏng, ${stats.no_snippet} không có mảnh code | ` +
         `token ${stats.token_in} vào / ${stats.token_out} ra` +
         (stats.throttled ? `, ${stats.throttled} lần bị 429 chặn` : '') +

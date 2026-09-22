@@ -26,14 +26,17 @@ test('bản sao fixture đúng là bản hợp đồng nó khai, không phải f
   const manifest = readManifest();
   assert.equal(manifest.schema_version, 1);
   assert.equal(manifest.canonical_form, 'cjson/1');
+  // Gom hết rồi mới báo, thay vì `assert` trong vòng lặp: `assert` ném ngay ở
+  // tệp lệch đầu tiên, nên bốn tệp phía sau không bao giờ được soát. Lần
+  // manifest bị lỗi thời, nó báo đúng một tên trong khi cả năm dòng đều sai —
+  // và bản vá cho "một tệp" để lại bốn tệp vẫn hỏng.
+  const lech = [];
   for (const [name, entry] of Object.entries(manifest.files)) {
     const raw = fs.readFileSync(path.join(FIXTURE_DIR, name));
-    assert.equal(
-      `sha256:${crypto.createHash('sha256').update(raw).digest('hex')}`,
-      entry.sha256,
-      `${name} lệch khỏi SHA-256 trong manifest`,
-    );
+    const got = `sha256:${crypto.createHash('sha256').update(raw).digest('hex')}`;
+    if (got !== entry.sha256) lech.push(`${name}: manifest ${entry.sha256}, tệp ${got}`);
   }
+  assert.deepEqual(lech, [], `lệch khỏi SHA-256 trong manifest:\n  ${lech.join('\n  ')}`);
 });
 
 test('Node tính lại được đúng danh tính và băm mà AstraQA đã ghi', () => {

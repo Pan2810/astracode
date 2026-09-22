@@ -4,23 +4,23 @@
   "copied_from": "astraqa/contracts/consistency/v1/fixtures/valid",
   "files": {
     "ac-5-to-10.json": {
-      "sha256": "sha256:b0ff4bc06f4dead95d5c92c08d91cd76af059418c8c8c460c1ab9f3eb5110ef3",
+      "sha256": "sha256:3606c2efbb16e7d3091b70b38c02847fc4c8b3a951c7fc83750ddf31a36c3342",
       "why": "editing a statement mints a new identity"
     },
     "duplicate-and-empty-ac.json": {
-      "sha256": "sha256:868ea67935141682e0a4da28a54c4582f6031128aff67502edcd06edae15cdde",
+      "sha256": "sha256:55b0bdc2d3b526ec5ca8b2bd542db89bce7e051890c39ee9b35ca260c14959c8",
       "why": "duplicates stay distinguishable; blanks are dropped and named"
     },
     "jira-5-docs-10-code-10.json": {
-      "sha256": "sha256:e63dcafda8efb5465902c163b4cf1889b4cf5ffed261901a3c44f0549ff9340e",
+      "sha256": "sha256:8d1450aea1959a2eddf2fe85326858ba0f39516f404a0e0f70f5883c215e5ef1",
       "why": "canonical baseline: every hash and the doc/code refs"
     },
     "reorder-ac.json": {
-      "sha256": "sha256:bef720572661ecec751ff3011e46b15ee373cb18e8256c3dc8da0cd13649b767",
+      "sha256": "sha256:6a5c4b0985b0911956403e41a20b64d3497e51ccdd56a27897104ef2ed4c8513",
       "why": "identities and requirement hash survive a reordered AC array"
     },
     "status-change-only.json": {
-      "sha256": "sha256:6e076d7a4688d8813c968ad0aaf1fb26f9661b859f7e3a723602e0bc40be140f",
+      "sha256": "sha256:f3e5fd8e219196273e3548bc517f80034642cdc585ee3836a20dbb8fcdff3b5e",
       "why": "status moves without touching the requirement or its criteria"
     }
   },

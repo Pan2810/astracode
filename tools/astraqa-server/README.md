@@ -473,36 +473,63 @@ Chú ý nó **không** có `error`. `tier: "grep"` kèm `error` là "đã thử 
 được"; `tier: "grep"` kèm `skipped: true` là "không cần thử". Hai chuyện khác nhau, và
 đọc lẫn nhau thì một bảng 190 dòng trông như 190 lượt hỏng.
 
-### Cache judge — khoá đã bao commit, nên không có TTL
+### Cache judge — khoá đã bao nội dung code, nên không có TTL
 
 Khoá của một entry gồm:
 
 ```
-repo_url + revision + ticket key + hash(summary + description + status)
-         + rules_version + model + dấu vân tay của prompt
+rules_version + model + dấu vân tay của prompt + ticket key
+              + hash(summary + description + status)
+              + vân tay nội dung những tệp ticket dẫn ra
 ```
 
 "Dấu vân tay của prompt" là quy ước codebase đang áp (`guidance_path`) cộng ba tham số
 `context_lines` / `max_snippets` / `max_snippet_lines`, backend, verdict guide,
-acceptance criteria, dẫn chứng và kết luận sơ bộ. Nó có mặt vì cùng một ticket trên
-cùng một commit vẫn là hai câu hỏi khác nhau nếu prompt khác: bên gọi nới `max_snippets`
-đúng lúc họ muốn một câu trả lời tốt hơn, và trả lại kết luận rẻ tiền của lần trước là
-kiểu hỏng không ai nhìn thấy.
+acceptance criteria và kết luận sơ bộ của tầng grep. Nó có mặt vì cùng một ticket trên
+cùng một đoạn code vẫn là hai câu hỏi khác nhau nếu prompt khác: bên gọi nới
+`max_snippets` đúng lúc họ muốn một câu trả lời tốt hơn, và trả lại kết luận rẻ tiền của
+lần trước là kiểu hỏng không ai nhìn thấy.
 
-Ðổi bất kỳ thành phần nào là một khoá khác. Vì `revision` nằm trong khoá, **cache không
-bao giờ trả lời thay cho code đã đổi** — một commit mới luôn là miss. Cũng vì thế không
-có TTL: một entry sáu tháng vẫn trả lời đúng câu hỏi của nó, vì commit ấy vẫn là commit
-ấy. Hết hạn theo thời gian ở đây chỉ tạo ra những lượt gọi lại không đổi kết quả.
+"Vân tay nội dung" là `sha256` của danh sách `<đường dẫn>` + blob id của tệp ấy tại
+revision đang xét, sắp theo đường dẫn và bỏ trùng. Blob id lấy từ
+`git cat-file --batch-check` — một tiến trình cho cả job, không phải một lần gọi `git`
+cho mỗi đường dẫn. Tệp không tồn tại ở revision ấy vẫn vào vân tay dưới dạng
+`<missing>`: một dẫn chứng trỏ vào tệp vừa bị xoá là thay đổi thật, và bỏ qua nó thì
+"đã xoá" với "chưa từng có" cho cùng một khoá. `lines` và `note` **không** vào khoá —
+sửa một dòng ở đầu tệp đẩy mọi số dòng phía dưới đi một bậc, trong khi nội dung tệp đã
+nằm sẵn trong vân tay.
+
+Ðánh đổi của chỗ ấy, nói thẳng ra: với cùng một tệp không đổi, hai `lines` khác nhau
+trích ra hai đoạn code khác nhau nhưng cho cùng một khoá. Chuyện này không xảy ra khi
+tầng grep của bên gọi giữ nguyên — cùng nội dung tệp thì nó chỉ ra cùng chỗ. Nếu bên
+gọi **đổi cách chọn cửa sổ dòng**, hãy bump `rules_version`: đó là cần gạt để nói "từ
+đây là một câu hỏi khác", và nó nằm trong khoá.
+
+Ðổi bất kỳ thành phần nào là một khoá khác, nên **cache không bao giờ trả lời thay cho
+code đã đổi**. Ðiều KHÔNG còn đúng nữa là chiều ngược lại: một commit mới không còn tự
+động là miss. Commit chỉ chạm ba tệp thì chỉ những ticket dẫn ra ba tệp ấy phải hỏi lại
+model — 164 ticket trên một board thật trước đây tốn 12 phút và ~700k token cho mỗi
+commit, gần hết trong số đó để nhận lại đúng kết luận cũ.
+
+Cũng vì thế không có TTL: một entry sáu tháng vẫn trả lời đúng câu hỏi của nó, vì đoạn
+code ấy vẫn là đoạn code ấy. Hết hạn theo thời gian ở đây chỉ tạo ra những lượt gọi lại
+không đổi kết quả.
+
+**Cache đời đầu vẫn sống.** Khoá cũ có `repo_url` + `revision` trong đó. Job tra khoá mới
+trước, trượt thì tra khoá cũ; một lần trúng khoá cũ được trả về ngay **và** chép sang
+khoá mới bằng một dòng append, nên lần sau nó là hit v2. Không dòng nào bị xoá, không
+tệp cache nào bị viết lại, và không dòng nào được ghi dưới khoá cũ nữa. Mỗi kết quả nói
+ra nó đến từ đâu: `"cache_hit": "v2" | "legacy"`.
 
 Chỗ lưu: `<WORKSPACE_DIR>/judge-cache/<tenant>.jsonl` (tên tenant được lọc về ký tự an
 toàn; nếu phép lọc làm mất ký tự nào thì tên tệp mang thêm tám ký tự băm, để `"Đội A"` và
 `"Nội A"` không dùng chung một tệp), mỗi entry một dòng JSON, append
 thêm chứ không sửa. Một job bị giết giữa lúc ghi chỉ làm dở dòng cuối, và dòng hỏng bị
 bỏ qua lúc nạp. **Chỉ lượt thành công được lưu**: một lỗi mạng mười giây mà vào cache sẽ
-thành kết luận vĩnh viễn cho ticket ấy trên commit ấy.
+thành kết luận vĩnh viễn cho ticket ấy trên đoạn code ấy.
 
-Dòng trúng cache trả về đúng kết luận cũ, kèm `"cached": true` — cùng một kết luận,
-nhưng không cùng một lần xét, và bên gọi có quyền biết điều đó.
+Dòng trúng cache trả về đúng kết luận cũ, kèm `"cached": true` và `"cache_hit"` —
+cùng một kết luận, nhưng không cùng một lần xét, và bên gọi có quyền biết điều đó.
 
 Dọn đĩa (việc duy nhất phải làm tay):
 
@@ -515,11 +542,14 @@ curl -sS -X DELETE "http://127.0.0.1:8000/api/v1/judge/cache?older_than=30d"   -
 trả, nên nó phải được nói ra. Dung lượng đang chiếm khai ở `/healthz`:
 
 ```json
-"judge_cache": { "tenants": 2, "entries": 500, "bytes": 184320 }
+"judge_cache": { "tenants": 2, "entries": 500, "entries_v2": 340, "entries_legacy": 160,
+                 "bytes": 184320 }
 ```
 
 (`entries: null` nghĩa là có tệp quá lớn nên không đếm dòng — một liveness probe không
-được phép đọc 50 MB mỗi lần gọi.)
+được phép đọc 50 MB mỗi lần gọi. `entries_v2` / `entries_legacy` chia số ấy theo phiên
+bản khoá, và cũng là `null` khi tệp lớn tới mức không đáng `JSON.parse` từng dòng trong
+một probe.)
 
 ### Prompt: gọn có chủ ý
 
@@ -595,25 +625,34 @@ rules bị cắt giữa chừng vẫn parse được và sẽ quyết verdict b�
   "done": 12,
   "total": 40,
   "progress": {
-    "done": 12, "total": 40, "skipped": 150, "cached": 30,
+    "done": 12, "total": 40, "skipped": 150,
+    "cached": 30, "cached_v2": 26, "cached_legacy": 4,
     "model_calls": 13, "token_in": 24180, "token_out": 5210, "throttled": 1
   },
   "source_revision": "<sha đã clone>",
   "results": [
     { "key": "WEB-1001", "verdict": "MATCH", "confidence": 0.82, "reason": "…", "tier": "ai" },
     { "key": "WEB-1002", "verdict": "CODE_AHEAD", "reason": "đã chắc ở tầng grep", "tier": "grep", "skipped": true },
-    { "key": "WEB-1003", "verdict": "MATCH", "confidence": 0.82, "tier": "ai", "cached": true },
+    { "key": "WEB-1003", "verdict": "MATCH", "confidence": 0.82, "tier": "ai", "cached": true, "cache_hit": "v2" },
     { "key": "WEB-1004", "tier": "grep", "error": "…" }
   ],
-  "stats": { "judged": 11, "failed": 1, "no_snippet": 0, "hits_429": 0, "duration_ms": 41230 }
+  "stats": { "judged": 11, "failed": 1, "no_snippet": 0, "hits_429": 0, "duration_ms": 41230,
+             "cache_hits": 30, "cache_hits_v2": 26, "cache_hits_legacy": 4, "cache_upgrades": 4 }
 }
 ```
+
+`cached` giữ nguyên nghĩa cũ — **tổng** số lượt lấy từ cache, đúng tên trường AstraQA
+đang đọc. `cached_v2` và `cached_legacy` chia tổng ấy theo phiên bản khoá đã đọc được,
+và cộng lại đúng bằng `cached`. `cache_upgrades` là số dòng khoá cũ vừa được chép sang
+khoá mới trong lần chạy này; lần chạy kế tiếp trên cùng dữ liệu, con số ấy phải là 0 và
+`cached_legacy` chuyển hết sang `cached_v2`.
 
 **`total` là số lượt THẬT SỰ gọi model**, không phải số ticket gửi lên. Một job 190
 ticket mà 150 đã chắc ở tầng grep và 30 trúng cache thì chỉ còn 10 lượt phải chờ — một
 thanh tiến độ chạy tới 190 ở đó là thanh sai, và nó sai theo hướng làm người ngồi xem
 tưởng còn lâu mới xong. Số dòng đã có nằm ở `results.length`; `202` lúc tạo job vẫn trả
-`total` bằng số ticket gửi lên, vì lúc ấy chưa clone nên chưa biết cái nào trúng cache.
+`total` bằng số ticket gửi lên, vì lúc ấy chưa clone nên chưa đọc được nội dung tệp để
+biết cái nào trúng cache.
 
 `token_in`/`token_out` là số nhà cung cấp trả về (`usage`), không phải ước lượng của
 server. `model_calls` đếm cả lượt thử lại, vì mỗi lần thử lại cũng là một request thật.

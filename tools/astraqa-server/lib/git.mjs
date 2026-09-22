@@ -5,7 +5,7 @@
  * đều đi qua `redact` trước khi rời hàm này: `git` in nguyên URL vào stderr khi
  * clone hỏng, nên đây là chỗ token dễ rò nhất trong cả server.
  */
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 
 const run = promisify(execFile);
@@ -173,4 +173,99 @@ export async function diffSinceBase({ repoDir, base, redact = (s) => s, timeoutM
     const detail = redact(err?.stderr || err?.message || String(err)).trim().split('\n').slice(-1)[0];
     return { base: sha, files: null, warning: `git diff ${wanted}..HEAD hỏng: ${detail} — changed_files là null.` };
   }
+}
+
+/**
+ * Chuẩn hoá một đường dẫn dẫn chứng về dạng git hiểu.
+ *
+ * Dẫn chứng đến từ tầng grep của bên gọi, và bên ấy có thể chạy trên Windows:
+ * `src\login.py` và `src/login.py` là cùng một tệp nhưng là hai chuỗi. Không
+ * gộp lại ở đây thì cùng một tệp sinh hai vân tay nội dung khác nhau, và cache
+ * trượt vì một dấu gạch.
+ */
+export function normalizeRepoPath(raw) {
+  return String(raw ?? '')
+    .trim()
+    .replace(/\\/g, '/')
+    .replace(/^\.\//, '')
+    .replace(/^\/+/, '');
+}
+
+/**
+ * Nội dung của từng tệp tại một revision, dưới dạng blob id.
+ *
+ * ## Vì sao blob id chứ không phải tự băm nội dung
+ *
+ * `git cat-file --batch-check` trả sẵn định danh nội dung mà git đã tính lúc
+ * commit: nó là SHA của chính nội dung tệp (cộng tiền tố `blob <len>\0`), nên
+ * hai tệp giống nhau từng byte luôn cùng một id kể cả ở hai repo khác nhau.
+ * Tự đọc rồi băm cho ra cùng một kết luận nhưng phải mở từng tệp — với 164
+ * ticket, mỗi ticket tới 8 dẫn chứng, đó là cả nghìn lần chạm đĩa để lấy lại
+ * thứ git đã có sẵn trong index.
+ *
+ * ## Một tiến trình cho cả job
+ *
+ * `--batch-check` đọc yêu cầu từ stdin, mỗi dòng một `<rev>:<path>`, và in
+ * ÐÚNG một dòng cho mỗi dòng vào, theo đúng thứ tự. Nhờ vậy cả job chỉ tốn một
+ * lần `spawn` thay vì một lần cho mỗi đường dẫn — trên Windows, một nghìn lần
+ * spawn là một phút đứng im trước khi ticket đầu tiên được gửi đi.
+ *
+ * Ghép kết quả theo THỨ TỰ chứ không đọc lại đường dẫn git in ra: dòng "không
+ * có" có dạng `<nguyên văn dòng vào> missing`, và một đường dẫn chứa khoảng
+ * trắng sẽ làm mọi cách tách theo dấu cách nói sai.
+ *
+ * @returns {Promise<Map<string, string|null>>} đường dẫn đã chuẩn hoá → blob id, `null` nếu revision đó không có tệp ấy.
+ */
+export async function blobIds({ repoDir, rev, paths, timeoutMs = 120_000 }) {
+  const uniq = [
+    ...new Set((Array.isArray(paths) ? paths : []).map(normalizeRepoPath).filter((p) => p && !p.includes('\n'))),
+  ].sort();
+  /** @type {Map<string, string|null>} */
+  const out = new Map();
+  if (uniq.length === 0) return out;
+
+  const revision = String(rev ?? '').trim() || 'HEAD';
+  const stdout = await new Promise((resolve, reject) => {
+    const child = spawn('git', ['cat-file', '--batch-check'], {
+      cwd: repoDir,
+      env: baseEnv(),
+      windowsHide: true,
+      stdio: ['pipe', 'pipe', 'ignore'],
+    });
+    let buf = '';
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        child.kill();
+        reject(new Error(`git cat-file quá ${timeoutMs}ms`));
+      }
+    }, timeoutMs);
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data', (chunk) => {
+      buf += chunk;
+    });
+    child.on('error', (err) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      reject(err);
+    });
+    child.on('close', () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(buf);
+    });
+    // stdin đóng lại được ngay: `--batch-check` đọc hết rồi mới thoát.
+    child.stdin.on('error', () => {});
+    child.stdin.end(uniq.map((p) => `${revision}:${p}`).join('\n') + '\n', 'utf8');
+  });
+
+  const lines = stdout.split('\n');
+  uniq.forEach((p, i) => {
+    const m = /^([0-9a-f]{40,64}) \S+ \d+$/.exec((lines[i] ?? '').trim());
+    out.set(p, m ? m[1] : null);
+  });
+  return out;
 }

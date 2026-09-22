@@ -607,9 +607,6 @@ export async function runAnalyzeJob({ job, body, config, redact, log, limiter = 
     log(`ASTRACODE_MAX_TICKETS=${maxTickets} — chỉ chấm ${toJudge.length}/${wanted.length} ticket, bỏ qua ${skipped.length} ticket còn lại.`);
   }
 
-  const repoDir = path.join(config.workspaceDir, job.id, 'repo');
-  await fs.mkdir(repoDir, { recursive: true });
-
   /*
    * Tiến độ đếm VIỆC PHẢI LÀM, không phải số dòng trong bảng.
    *
@@ -633,7 +630,19 @@ export async function runAnalyzeJob({ job, body, config, redact, log, limiter = 
   const publish = () => {
     job.progress = { ...counted };
   };
+  /*
+   * Publish TRƯỚC lần `await` đầu tiên của hàm này.
+   *
+   * Route trả 202 rồi mới gọi `start()`, nên mọi thứ chạy được trước dấu
+   * `await` đầu tiên vẫn nằm gọn trong cùng một nhịp với câu trả lời — còn thứ
+   * nằm sau nó thì không. Trước đây `mkdir` đứng chen vào giữa, nên lần GET
+   * đầu tiên của bên gọi đọc được cái `{done: 0, total: 0}` mà route dựng tạm
+   * lúc tạo job: một tiến độ nói "không có việc gì phải làm" cho một job vừa
+   * nhận 184 ticket.
+   */
   publish();
+  const repoDir = path.join(config.workspaceDir, job.id, 'repo');
+  await fs.mkdir(repoDir, { recursive: true });
   job.astraworkToken = body.astrawork_token || config.astraworkJwt || '';
   const startedAt = Date.now();
   const stats = {
