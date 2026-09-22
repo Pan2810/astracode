@@ -515,11 +515,14 @@ Cũng vì thế không có TTL: một entry sáu tháng vẫn trả lời đúng
 code ấy vẫn là đoạn code ấy. Hết hạn theo thời gian ở đây chỉ tạo ra những lượt gọi lại
 không đổi kết quả.
 
-**Cache đời đầu vẫn sống.** Khoá cũ có `repo_url` + `revision` trong đó. Job tra khoá mới
-trước, trượt thì tra khoá cũ; một lần trúng khoá cũ được trả về ngay **và** chép sang
-khoá mới bằng một dòng append, nên lần sau nó là hit v2. Không dòng nào bị xoá, không
-tệp cache nào bị viết lại, và không dòng nào được ghi dưới khoá cũ nữa. Mỗi kết quả nói
-ra nó đến từ đâu: `"cache_hit": "v2" | "legacy"`.
+**Cache đời đầu vẫn sống — cả hai thế hệ của nó.** Khoá cũ có `repo_url` + `revision`
+trong đó, và bản thân nó đã đổi một lần (`prompt` từ chỗ băm thẳng `promptShape` thành
+một object bọc quanh nó). Một tệp cache đang chạy có thể mang dòng của cả hai thế hệ, và
+không có gì trong dòng cache nói ra nó thuộc thế hệ nào — nên job tra khoá mới trước,
+trượt thì tra lần lượt hai khoá cũ. Một lần trúng khoá cũ được trả về ngay **và** chép
+sang khoá mới bằng một dòng append, nên lần sau nó là hit v2. Không dòng nào bị xoá,
+không tệp cache nào bị viết lại, và không dòng nào được ghi dưới khoá cũ nữa. Mỗi kết
+quả nói ra nó đến từ đâu: `"cache_hit": "v2" | "legacy"`.
 
 Chỗ lưu: `<WORKSPACE_DIR>/judge-cache/<tenant>.jsonl` (tên tenant được lọc về ký tự an
 toàn; nếu phép lọc làm mất ký tự nào thì tên tệp mang thêm tám ký tự băm, để `"Đội A"` và

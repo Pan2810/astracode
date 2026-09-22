@@ -252,17 +252,25 @@ test('vân tay nội dung ghi "<missing>" cho tệp không có ở revision ấy
 });
 
 /**
- * Khoá ÐỜI ÐẦU, dựng lại y nguyên công thức `lib/judge.mjs` từng ghi.
+ * Hai khoá ÐỜI ÐẦU, dựng lại y nguyên hai công thức `lib/judge.mjs` từng ghi.
  *
- * Chép lại ở đây là có chủ ý: đây là thứ duy nhất đọc được những dòng cache đã
- * nằm trên đĩa. Ca (e) chỉ xanh khi công thức này khớp từng ký tự với bản đang
- * chạy — nên nếu ai đó sửa nó bên kia, ca này đỏ, đúng lúc cần đỏ.
+ * Có HAI chứ không phải một: công thức khoá đã đổi một lần trước lần này, và
+ * một tệp cache đang chạy có thể mang dòng của cả hai thế hệ. Chép lại ở đây
+ * là có chủ ý — đây là thứ duy nhất đọc được những dòng đã nằm trên đĩa, nên
+ * hai ca dưới chỉ xanh khi công thức khớp từng ký tự với bản đang chạy. Ai sửa
+ * chúng bên kia thì ca này đỏ, đúng lúc cần đỏ.
  */
-function legacyKeyFor(t, head) {
-  const promptShape = JSON.stringify({
+function legacyKeyFor(t, head, doi = 'sau') {
+  const shapeSau = JSON.stringify({
     backend: 'fci',
     cliPath: undefined,
     guide: GUIDE,
+    guidance: '',
+    context_lines: 20,
+    max_snippets: 3,
+    max_snippet_lines: 41,
+  });
+  const shapeDau = JSON.stringify({
     guidance: '',
     context_lines: 20,
     max_snippets: 3,
@@ -277,32 +285,41 @@ function legacyKeyFor(t, head) {
     status: t.status,
     rulesVersion: RULES,
     model: MODEL,
-    prompt: JSON.stringify({
-      shape: promptShape,
-      acceptance_criteria: [],
-      evidence: t.evidence,
-      grep_verdict: t.grep_verdict,
-      grep_reason: t.grep_reason,
-    }),
+    prompt:
+      doi === 'đầu'
+        ? shapeDau
+        : JSON.stringify({
+            shape: shapeSau,
+            acceptance_criteria: [],
+            evidence: t.evidence,
+            grep_verdict: t.grep_verdict,
+            grep_reason: t.grep_reason,
+          }),
   });
 }
 
-test('(e)+(f) dòng cache cũ vẫn dùng được một lần, được chép sang khoá v2, và model không bị gọi', async () => {
-  const head = await headSha();
-  const t = ticket('LEG-1');
+/** Ghi sẵn một dòng cache dưới một khoá đời đầu, rồi trả lại kết quả đã lưu. */
+async function gieoDongCu(t, head, doi) {
   const cacheFile = path.join(wsDir, 'judge-cache', 'default.jsonl');
   await fs.mkdir(path.dirname(cacheFile), { recursive: true });
-  const luuSan = {
-    k: legacyKeyFor(t, head),
+  const rec = {
+    k: legacyKeyFor(t, head, doi),
     at: new Date().toISOString(),
     repo_url: repoUrl,
     revision: head,
     key: t.key,
     rules_version: RULES,
     model: MODEL,
-    result: { key: t.key, verdict: 'JIRA_AHEAD', confidence: 0.9, reason: 'từ dòng cache đời đầu', tier: 'ai' },
+    result: { key: t.key, verdict: 'JIRA_AHEAD', confidence: 0.9, reason: `từ dòng cache đời ${doi}`, tier: 'ai' },
   };
-  await fs.writeFile(cacheFile, JSON.stringify(luuSan) + '\n', 'utf8');
+  await fs.appendFile(cacheFile, JSON.stringify(rec) + '\n', 'utf8');
+  return { cacheFile, rec };
+}
+
+test('(e)+(f) dòng cache cũ vẫn dùng được một lần, được chép sang khoá v2, và model không bị gọi', async () => {
+  const head = await headSha();
+  const t = ticket('LEG-1');
+  const { cacheFile, rec: luuSan } = await gieoDongCu(t, head, 'sau');
 
   const payload = { repo_url: repoUrl, rules_version: RULES, verdict_guide: GUIDE, tickets: [t] };
 
@@ -338,6 +355,43 @@ test('(e)+(f) dòng cache cũ vẫn dùng được một lần, được chép s
   assert.equal(lan2.results[0].cache_hit, 'v2');
   assert.equal(lan2.stats.cache_upgrades, 0, 'không chép lại lần nữa');
   assert.equal((await fs.readFile(cacheFile, 'utf8')).split('\n').filter(Boolean).length, 2);
+});
+
+/*
+ * Thế hệ khoá cũ HƠN nữa — và đây là thế hệ nằm trong tệp cache đang chạy.
+ *
+ * Công thức khoá đã đổi một lần trước lát này (`prompt: promptShape` thành một
+ * object bọc quanh nó, và `promptShape` cũng mọc thêm ba field). Ðỡ mỗi thế hệ
+ * sau cùng thì đúng 164 dòng đã trả tiền để có vẫn chết — chúng được ghi bởi
+ * phiên bản server chạy trước lần đổi ấy, và không có gì trong dòng cache nói
+ * ra nó thuộc thế hệ nào.
+ */
+test('dòng cache của thế hệ khoá cũ hơn nữa cũng được đọc và chép sang v2', async () => {
+  const head = await headSha();
+  const t = ticket('LEG-0');
+  const { cacheFile } = await gieoDongCu(t, head, 'đầu');
+  const truoc = (await fs.readFile(cacheFile, 'utf8')).split('\n').filter(Boolean).length;
+
+  const payload = { repo_url: repoUrl, rules_version: RULES, verdict_guide: GUIDE, tickets: [t] };
+
+  calls = [];
+  const lan1 = await judged({ ...payload, run_id: 'LEG-0-A' });
+  assert.equal(lan1.status, 'succeeded');
+  assert.deepEqual(calls, [], 'thế hệ cũ hơn vẫn phải cứu được, không gọi model');
+  assert.equal(lan1.progress.cached_legacy, 1);
+  assert.equal(lan1.results[0].reason, 'từ dòng cache đời đầu');
+  assert.equal(lan1.stats.cache_upgrades, 1);
+
+  calls = [];
+  const lan2 = await judged({ ...payload, run_id: 'LEG-0-B' });
+  assert.deepEqual(calls, []);
+  assert.equal(lan2.progress.cached_v2, 1);
+  assert.equal(lan2.results[0].cache_hit, 'v2');
+  assert.equal(
+    (await fs.readFile(cacheFile, 'utf8')).split('\n').filter(Boolean).length,
+    truoc + 1,
+    'đúng một dòng được nối thêm, không dòng nào bị xoá',
+  );
 });
 
 test('commit không chạm tệp được dẫn ra thì lần chạy sau vẫn trúng cache', async () => {

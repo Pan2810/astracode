@@ -423,14 +423,36 @@ export async function runJudgeJob({ job, body, config, redact, log, limiter, usa
       max_snippet_lines: options.max_snippet_lines,
     });
     /*
-     * Khoá CŨ, giữ lại chỉ để tra cứu.
+     * Hình dạng prompt ÐỜI ÐẦU — bốn field, không có `backend`/`cliPath`/`guide`.
      *
-     * Không còn dòng nào được ghi dưới khoá này nữa; nó tồn tại để những dòng
-     * đã nằm sẵn trên đĩa vẫn dùng được thêm đúng một lần, rồi được chép sang
-     * khoá mới. Ðụng vào công thức ở đây là làm mù cả cache cũ.
+     * Những dòng cache viết trước khi ba field kia được thêm vào đều mang dấu
+     * vân tay tính từ đúng bốn field này. Giữ lại vì đó là cách duy nhất đọc
+     * được chúng.
      */
-    const legacyKeyFor = (ticket) =>
-      cacheKey({
+    const promptShapeV0 = JSON.stringify({
+      guidance: guidance || '',
+      context_lines: options.context_lines,
+      max_snippets: options.max_snippets,
+      max_snippet_lines: options.max_snippet_lines,
+    });
+
+    /*
+     * Khoá CŨ, giữ lại chỉ để tra cứu — và có HAI thế hệ, không phải một.
+     *
+     * Công thức khoá đã đổi một lần trước lần này: bản đầu băm thẳng
+     * `promptShape`, bản sau bọc nó trong một object cùng acceptance criteria,
+     * dẫn chứng và kết luận grep. Một tệp cache đang chạy có thể mang dòng của
+     * cả hai thế hệ — và thế hệ nào nằm trong đó phụ thuộc vào phiên bản server
+     * đang chạy lúc dòng ấy được ghi, thứ không ai đọc ra được từ chính dòng ấy.
+     * Nên tra cả hai, mới trước cũ sau.
+     *
+     * Không còn dòng nào được ghi dưới bất kỳ khoá nào ở đây nữa; chúng tồn tại
+     * để những dòng đã nằm sẵn trên đĩa dùng được thêm đúng một lần, rồi được
+     * chép sang khoá mới. Ðụng vào một trong hai công thức là làm mù đúng thế
+     * hệ cache ấy.
+     */
+    const legacyKeysFor = (ticket) => {
+      const common = {
         repoUrl: body.repo_url,
         revision: head || '',
         ticketKey: ticket.key,
@@ -439,9 +461,16 @@ export async function runJudgeJob({ job, body, config, redact, log, limiter, usa
         status: ticket.status,
         rulesVersion: selection.rulesVersion,
         model: config.fciModel,
-        prompt: JSON.stringify({ shape: promptShape, acceptance_criteria: ticket.acceptance_criteria,
-          evidence: ticket.evidence, grep_verdict: ticket.grep_verdict, grep_reason: ticket.grep_reason }),
-      });
+      };
+      return [
+        cacheKey({
+          ...common,
+          prompt: JSON.stringify({ shape: promptShape, acceptance_criteria: ticket.acceptance_criteria,
+            evidence: ticket.evidence, grep_verdict: ticket.grep_verdict, grep_reason: ticket.grep_reason }),
+        }),
+        cacheKey({ ...common, prompt: promptShapeV0 }),
+      ];
+    };
 
     /*
      * Blob id của mọi tệp được dẫn ra trong cả job — một lần `git cat-file` cho
@@ -546,10 +575,13 @@ export async function runJudgeJob({ job, body, config, redact, log, limiter, usa
       let via = hit ? 'v2' : null;
       let upgrade = false;
       if (!hit && cache) {
-        hit = cache.get(legacyKeyFor(ticket));
-        if (hit) {
-          via = 'legacy';
-          upgrade = Boolean(k);
+        for (const old of legacyKeysFor(ticket)) {
+          hit = cache.get(old);
+          if (hit) {
+            via = 'legacy';
+            upgrade = Boolean(k);
+            break;
+          }
         }
       }
       if (hit) {
