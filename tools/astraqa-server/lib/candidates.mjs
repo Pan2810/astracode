@@ -398,6 +398,84 @@ export function firstLineWith(index, relPath, terms) {
   return { line: 1, term: terms[0] ?? '' };
 }
 
+/** §3.5 — dòng mở đầu một khai báo, theo cú pháp các ngôn ngữ trong `CODE_EXT`. */
+const RE_DECLARATION =
+  /^\s*(?:@|export\s+|public\s+|private\s+|protected\s+|static\s+|final\s+|async\s+)*(?:class|def|function|interface|type|struct|enum|fn|func|module|namespace|const|let|var)\b|^\s*[A-Z][A-Z0-9_]{2,}\s*[:=]/;
+
+/** §3.5 — dòng chỉ chứa chú thích, theo cú pháp chung của các ngôn ngữ ấy. */
+const RE_COMMENT_ONLY = /^\s*(?:#|\/\/|\/\*|\*|--|"""|''')/;
+
+/**
+ * §3.5 — dòng ÐẠI DIỆN cho file, để dựng `evidence.lines` thật.
+ *
+ * `firstLineWith` chọn dòng khớp ÐẦU TIÊN, và với Python dòng ấy gần như luôn là
+ * docstring của module: `core/tasks.py` khớp "scheduling" ngay dòng 1 trong khi
+ * phần hiện thực nằm ở 325-355. Bên đọc trích dẫn này mở một cửa sổ ±20 dòng
+ * QUANH NÓ, nên một trích dẫn trỏ vào dòng 1 khiến model đọc đúng phần đầu file
+ * rồi kết luận tính năng không tồn tại — `app.py` có `class _Toast` ở dòng 53 và
+ * bị chấm JIRA_AHEAD ở confidence 0,95 vì trích dẫn trỏ vào dòng 2.
+ *
+ * Ðo trên board `coworklocal_s2`, 9 ticket đã biết dòng hiện thực thật: cửa sổ
+ * ±20 quanh neo cũ phủ 2/9, quanh neo này phủ 6/9. Ba ca còn lại là file mà một
+ * cửa sổ không đủ — việc của bên đọc, không phải của phép chọn ở đây.
+ *
+ * Thang điểm, từng phần đều có lý do:
+ *
+ * * **số term khác nhau trên dòng** là tín hiệu chính — một dòng nhắc cả "cron"
+ *   lẫn "expression" đang nói về ticket, một dòng chỉ có "top" thì không;
+ * * **dòng khai báo** được cộng, vì khoảng ±N quanh một `def`/`class` bao trọn
+ *   phần thân, còn quanh một lời gọi thì không;
+ * * **docstring mở đầu bị trừ** mạnh hơn phần cộng của một term lẻ, đủ để mất
+ *   ngôi khi có bất kỳ dòng thật nào khớp, nhưng vẫn được chọn khi nó là chỗ duy
+ *   nhất khớp — im lặng về một file đã khớp còn tệ hơn trỏ vào lời mở đầu của nó.
+ *
+ * Hoà điểm thì dòng SỚM HƠN thắng, để hai lần chạy trên cùng một commit cho ra
+ * cùng một trích dẫn.
+ */
+export function bestLineWith(index, relPath, terms) {
+  const f = index.files.find((x) => x.path === relPath);
+  if (!f) return { line: 1, term: terms[0] ?? '' };
+  const lines = f.text.split(/\r?\n/);
+  const docEnd = leadingDocEnd(lines);
+
+  let best = null;
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i];
+    const low = fold(raw);
+    const hits = terms.filter((t) => low.includes(t));
+    if (!hits.length) continue;
+
+    let score = hits.length * 10;
+    if (RE_DECLARATION.test(raw)) score += 7;
+    if (RE_COMMENT_ONLY.test(raw)) score -= 4;
+    if (i + 1 <= docEnd) score -= 12;
+    if (!best || score > best.score) best = { score, line: i + 1, term: hits[0] };
+  }
+  return best ? { line: best.line, term: best.term } : { line: 1, term: terms[0] ?? '' };
+}
+
+/**
+ * Dòng cuối của khối docstring/chú thích mở đầu file, hoặc 0 khi không có.
+ *
+ * Chỉ nhìn 40 dòng đầu: quá đó thì thứ đang đọc không còn là lời mở đầu, và một
+ * file mở bằng chuỗi ba nháy dài hơn thế là file mà cả phần đầu KHÔNG nên bị trừ
+ * điểm hàng loạt.
+ */
+function leadingDocEnd(lines) {
+  const first = (lines[0] ?? '').trim();
+  const fence = first.startsWith('"""') ? '"""' : first.startsWith("'''") ? "'''" : '';
+  if (fence) {
+    if (first.slice(3).includes(fence)) return 1;
+    for (let i = 1; i < Math.min(lines.length, 40); i++) {
+      if (lines[i].includes(fence)) return i + 1;
+    }
+    return 0;
+  }
+  let i = 0;
+  while (i < Math.min(lines.length, 40) && RE_COMMENT_ONLY.test(lines[i] ?? '')) i += 1;
+  return i;
+}
+
 /**
  * §5 — lựa chọn siết chặt cho `backend=none`. **ÐÃ CHỐT 2026-09-16. ÐÓNG BĂNG.**
  *

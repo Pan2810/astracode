@@ -20,7 +20,7 @@
  *   - không quét được file nào           → `missing`, `scan: null`
  *     Không biết gì cả → AstraQA đọc thành `NO_EVIDENCE`, không bao giờ `JIRA_AHEAD`.
  */
-import { shortlistFor, firstLineWith, TIGHTEN_MODE, MAX_FILES_PER_TICKET } from './candidates.mjs';
+import { shortlistFor, bestLineWith, TIGHTEN_MODE, MAX_FILES_PER_TICKET } from './candidates.mjs';
 
 /**
  * @param {object} a
@@ -36,7 +36,7 @@ export async function judgeWithoutModel({ ticket, options, index }) {
   });
 
   const evidence = files.map((f) => {
-    const { line, term } = firstLineWith(index, f.path, f.matched);
+    const { line, term } = bestLineWith(index, f.path, f.matched);
     return {
       path: f.path,
       lines: String(line),
