@@ -673,14 +673,20 @@ export async function runAnalyzeJob({ job, body, config, redact, log, limiter = 
   job.stats = stats;
 
   try {
-    const { head } = await cloneRepo({
+    const { head, sourceCache } = await cloneRepo({
       repoUrl: body.repo_url,
       ref: body.ref,
       repoToken: body.repo_token,
       destDir: repoDir,
+      cacheDir: config.repoCacheDir || path.join(config.workspaceDir, 'repo-cache'),
+      cacheScope: String(body.source_cache_scope || ''),
       redact,
       timeoutMs,
     });
+    if (sourceCache?.warning) {
+      warnings.push(sourceCache.warning);
+      log(`CẢNH BÁO: ${sourceCache.warning}`);
+    }
 
     const items = [];
     /** Ticket nào có mô tả bị cắt — để một dòng cảnh báo gọi đúng tên chúng. */
@@ -990,6 +996,9 @@ export async function runAnalyzeJob({ job, body, config, redact, log, limiter = 
       // SHA đầy đủ của commit đã clone. Cùng giá trị lặp lại trong `item.scan.revision`
       // để mỗi item tự chứa, dựng được link dẫn chứng mà không phải ngoái lên.
       source_revision: head || null,
+      // Có mặt ở cả lần online và fallback để caller phân biệt "cache đã được
+      // cập nhật" với "đang dùng bản cũ vì Git không tới được".
+      source_cache: sourceCache,
       /*
        * `.astraqa/rules.yml` như nó nằm trong repo, hoặc `null` khi repo không
        * có. `null` khác với một tệp rỗng và bên gọi phân biệt hai cái: tệp rỗng

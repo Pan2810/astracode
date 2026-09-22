@@ -24,6 +24,7 @@ Server tự nạp `.env` ở gốc repo (và `.env.local`) theo đúng quy ướ
 |---|---|---|---|
 | `PORT` | không | `8000` | Cổng nghe, bind `127.0.0.1` |
 | `WORKSPACE_DIR` | không | `<tmp>/astracode-astraqa` | Nơi clone repo tạm. Mỗi job một thư mục con, **xoá khi job kết thúc** (kể cả khi lỗi). Đường dẫn tương đối được resolve về tuyệt đối theo cwd lúc khởi động; tạo/ghi không được thì server DỪNG |
+| `ASTRACODE_REPO_CACHE_DIR` | không | `<WORKSPACE_DIR>/repo-cache` | Bare mirror của source đã scan. Mỗi lần chạy thử fetch remote trước; lỗi mạng tạm thời thì phân tích commit trong cache và trả cảnh báo. Lỗi token/quyền truy cập vẫn làm job thất bại, không fallback âm thầm |
 | `ASTRACODE_SERVICE_TOKEN` | **nên có** | rỗng | Token AstraQA phải gửi, và `/admin` cũng đòi nó (kể cả từ loopback). **Rỗng = chế độ dev, bỏ kiểm xác thực**, có một dòng cảnh báo lúc khởi động |
 | `ASTRACODE_JUDGE` | không | `fci` | `fci` \| `cli` \| `none` — xem "Ba backend" bên dưới |
 | `FPT_BASE_URL` | khi `fci` | — | Gốc endpoint OpenAI-compatible, **kèm `/v1`** |
@@ -32,6 +33,11 @@ Server tự nạp `.env` ở gốc repo (và `.env.local`) theo đúng quy ướ
 | `ASTRACODE_JUDGE_CONCURRENCY` | không | `2` | Trần lượt gọi model chạy cùng lúc trên **cả server**. `POST /api/v1/judge` chạy song song tới đúng con số này; hạn mức tính theo API key mà key thì cả server dùng chung, nên trần ở đây chứ không ở từng job. **Với endpoint FPT nên đặt `8`** — nó chịu được, và 190 ticket ở mức 2 thì chạy lâu gấp bốn mà không đổi được gì ở phía nhà cung cấp. Gặp `429` thì server tự lùi theo `Retry-After`, nên đặt cao không phải là đánh cược. Banner lúc khởi động nhắc lại nếu đang để thấp hơn 8 |
 | `ASTRACODE_CLI_PATH` | khi `cli` | `<repo>/packages/cli/dist/main.js` | Trỏ vào `test/fakeCli.mjs` để chạy thử không tốn LLM |
 | `ASTRAWORK_JWT` | khi `cli` | rỗng | JWT AstraWork. Request có `astrawork_token` thì dùng cái đó, không thì rơi về biến này |
+
+Source cache không có TTL tự động: nó được giữ cho tới khi operator xoá thư mục
+`ASTRACODE_REPO_CACHE_DIR`. Xoá cache không làm mất report cũ; lần scan online kế tiếp sẽ
+tạo lại mirror, còn lần scan offline đầu tiên sau khi xoá sẽ thất bại vì không còn source.
+Ở môi trường container, trỏ biến này vào persistent volume thay vì filesystem tạm.
 
 Ngoài các biến này server không đọc biến cấu hình nào khác. Các biến OS (`PATH`, `HOME`,
 `TEMP`…) chỉ được *chuyển tiếp* cho `git` và cho tiến trình CLI con để chúng chạy được.

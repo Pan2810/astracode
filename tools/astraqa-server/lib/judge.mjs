@@ -362,11 +362,13 @@ export async function runJudgeJob({ job, body, config, redact, log, limiter, usa
   job.stats = stats;
 
   try {
-    const { head } = await cloneRepo({
+    const { head, sourceCache } = await cloneRepo({
       repoUrl: body.repo_url,
       ref: body.ref,
       repoToken: body.repo_token,
       destDir: repoDir,
+      cacheDir: config.repoCacheDir || path.join(config.workspaceDir, 'repo-cache'),
+      cacheScope: String(body.source_cache_scope || body.tenant || ''),
       redact,
       timeoutMs,
     });
@@ -650,6 +652,7 @@ export async function runJudgeJob({ job, body, config, redact, log, limiter, usa
       run_id: body.run_id ?? null,
       generated_at: new Date().toISOString(),
       source_revision: head || null,
+      source_cache: sourceCache,
       results: job.results,
       stats,
     };

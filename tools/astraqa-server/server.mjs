@@ -9,9 +9,10 @@
  *
  *     node <ASTRACODE_CLI_PATH> --mode=plan --raw -p "<prompt>"
  *
- * Stateless theo nghĩa nghiêm: server không biết dự án nào tồn tại. Repo, ref,
- * danh sách ticket, định dạng ticket, glob loại trừ — tất cả đến từ request.
- * Năm biến môi trường dưới đây là toàn bộ cấu hình nó đọc.
+ * Server không biết dự án nào tồn tại: repo, ref, danh sách ticket, định dạng
+ * ticket và glob loại trừ đều đến từ request. Nó chỉ giữ bare mirror theo URL
+ * để cùng source vẫn phân tích được khi Git tạm gián đoạn; mirror không chứa
+ * token, ticket hay quyết định nghiệp vụ.
  */
 import http from 'node:http';
 import os from 'node:os';
@@ -38,13 +39,17 @@ const MAX_JOBS_KEPT = 200;
 
 export function readConfig(env = process.env) {
   const here = path.dirname(fileURLToPath(import.meta.url));
+  const workspaceDir = path.resolve(env.WORKSPACE_DIR || path.join(os.tmpdir(), 'astracode-astraqa'));
   return {
     port: Number(env.PORT || 8000),
     // LUÔN tuyệt đối. Một `WORKSPACE_DIR=./.workspace` làm `repoDir` trong
     // analyze.mjs thành đường dẫn tương đối, trong khi `keepRealEvidence` so nó
     // với `path.resolve(...)`: phép so không bao giờ đúng, nên 100% bằng chứng
     // bị loại với lý do "thoát khỏi repo" mà job vẫn báo succeeded.
-    workspaceDir: path.resolve(env.WORKSPACE_DIR || path.join(os.tmpdir(), 'astracode-astraqa')),
+    workspaceDir,
+    // Bare mirrors sống qua nhiều job. Mỗi job vẫn có working tree riêng và
+    // vẫn bị xoá; mirror chỉ cung cấp source theo commit khi Git tạm gián đoạn.
+    repoCacheDir: path.resolve(env.ASTRACODE_REPO_CACHE_DIR || path.join(workspaceDir, 'repo-cache')),
     // Mặc định trỏ vào CLI của chính repo này — tính từ vị trí file, không phải
     // một đường dẫn cứng của máy ai.
     cliPath: env.ASTRACODE_CLI_PATH || path.resolve(here, '..', '..', 'packages', 'cli', 'dist', 'main.js'),
@@ -715,11 +720,13 @@ if (isMain) {
   }
   try {
     await ensureWorkspaceWritable(config.workspaceDir);
+    await ensureWorkspaceWritable(config.repoCacheDir);
   } catch (err) {
     // Cùng luật với readConfig: hỏng thì hiện lỗi ngay ở banner, đừng khởi động
     // rồi để mỗi job tự chết một kiểu.
     console.error(
-      `astraqa-server KHÔNG khởi động được: WORKSPACE_DIR "${config.workspaceDir}" không tạo/ghi được — ` +
+      `astraqa-server KHÔNG khởi động được: workspace/cache source không tạo/ghi được ` +
+        `(WORKSPACE_DIR="${config.workspaceDir}", ASTRACODE_REPO_CACHE_DIR="${config.repoCacheDir}") — ` +
         `${err instanceof Error ? err.message : String(err)}`,
     );
     process.exit(2);

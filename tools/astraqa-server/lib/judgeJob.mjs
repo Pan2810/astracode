@@ -58,7 +58,16 @@ export async function runJudgeJob({ job, body, config, redact, limiter, usage })
   const repoDir = path.join(config.workspaceDir, job.id, 'repo');
   await fs.mkdir(repoDir, { recursive: true });
   try {
-  const { head } = await cloneRepo({ repoUrl: body.repo_url, ref: String(body.ref || ''), repoToken: String(body.repo_token || ''), destDir: repoDir, redact, timeoutMs: 300000 });
+  const { head, sourceCache } = await cloneRepo({
+    repoUrl: body.repo_url,
+    ref: String(body.ref || ''),
+    repoToken: String(body.repo_token || ''),
+    destDir: repoDir,
+    cacheDir: config.repoCacheDir || path.join(config.workspaceDir, 'repo-cache'),
+    cacheScope: String(body.source_cache_scope || body.tenant || ''),
+    redact,
+    timeoutMs: 300000,
+  });
   if (/^[a-f0-9]{40}$/i.test(String(body.ref || '')) && head.toLowerCase() !== body.ref.toLowerCase()) {
     throw new Error('Judge clone did not resolve to the pinned source revision.');
   }
@@ -66,6 +75,7 @@ export async function runJudgeJob({ job, body, config, redact, limiter, usage })
   job.done = 0;
   job.results = [];
   job.source_revision = head;
+  job.source_cache = sourceCache;
   for (const ticket of tickets) {
     if (job.abort.signal.aborted) { job.status = 'cancelled'; return; }
     job.current = String(ticket.key);

@@ -62,6 +62,11 @@ test('readConfig: WORKSPACE_DIR tương đối vẫn ra đường dẫn tuyệt 
   const cfg = readConfig({ WORKSPACE_DIR: './.workspace' });
   assert.ok(path.isAbsolute(cfg.workspaceDir), `phải tuyệt đối, nhận "${cfg.workspaceDir}"`);
   assert.equal(cfg.workspaceDir, path.resolve(tmp, '.workspace'));
+  assert.equal(cfg.repoCacheDir, path.resolve(tmp, '.workspace', 'repo-cache'));
+  assert.equal(
+    readConfig({ WORKSPACE_DIR: './.workspace', ASTRACODE_REPO_CACHE_DIR: './source-cache' }).repoCacheDir,
+    path.resolve(tmp, 'source-cache'),
+  );
   // Mặc định (không đặt biến) vốn đã tuyệt đối — đừng để resolve làm hỏng nó.
   assert.ok(path.isAbsolute(readConfig({}).workspaceDir));
 });

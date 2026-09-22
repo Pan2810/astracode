@@ -371,9 +371,11 @@ lọc evidence**.
 | `cli` | Spawn `node <ASTRACODE_CLI_PATH> --mode=plan --raw -p "<prompt>"`, cwd = repo đã clone; agent tự duyệt repo | `ASTRACODE_CLI_PATH`, `ASTRAWORK_JWT` (hoặc `astrawork_token` trong request) | Có JWT AstraWork; kết quả sâu nhất |
 | `none` | Không gọi model. Quét từ khoá ticket trên cây file, trả dòng khớp kèm số dòng thật | *(không cần gì)* | Dựng đường ống, kiểm hợp đồng với AstraQA, mức nền tất định |
 
-Env dùng chung cho cả ba: `PORT` (mặc định 8000), `WORKSPACE_DIR` (nơi clone tạm, **tự xoá
-sau mỗi job**), `ASTRACODE_SERVICE_TOKEN` (rỗng = chế độ dev, bỏ kiểm xác thực + cảnh báo
-một dòng lúc khởi động).
+Env dùng chung cho cả ba: `PORT` (mặc định 8000), `WORKSPACE_DIR` (working tree tạm,
+**tự xoá sau mỗi job**), `ASTRACODE_REPO_CACHE_DIR` (bare mirror sống qua nhiều job;
+mặc định `<WORKSPACE_DIR>/repo-cache`) và `ASTRACODE_SERVICE_TOKEN` (rỗng = chế độ dev,
+bỏ kiểm xác thực + cảnh báo một dòng lúc khởi động). Mirror không lưu token; khi Git lỗi
+mạng tạm thời, job dùng commit đã cache và trả cảnh báo. Lỗi xác thực/quyền không fallback.
 
 **`none` không bao giờ trả `done`.** Quét từ khoá chứng minh được "có chỗ nhắc tới", không
 chứng minh được "đã làm xong"; trần của nó là `partial`. Đây là ranh giới giữa nó và hai
@@ -848,8 +850,9 @@ PORT=8000 WORKSPACE_DIR="$TEMP/astracode-astraqa" node tools/astraqa-server/serv
 Backend lấy theo `.env` (`ASTRACODE_JUDGE=fci`). Hai biến đặt ngoài là cố ý, và cả hai đều
 **thắng** `.env` (quy ước của `env.mjs`: biến đã export thắng file):
 
-- `WORKSPACE_DIR` trỏ ra ngoài repo — `.env` để `./.workspace`, sẽ đẻ một thư mục untracked
-  ngay trong repo. Thư mục này bị xoá sau mỗi job nên chẳng việc gì phải nằm trong cây nguồn.
+- `WORKSPACE_DIR` trỏ ra ngoài repo — working tree con của từng job bị xoá sau khi job kết thúc.
+- `ASTRACODE_REPO_CACHE_DIR` nên trỏ vào persistent volume riêng; bare mirror trong đó được
+  giữ lại để vẫn phân tích được commit đã scan khi Git tạm mất kết nối.
 - `PORT=8000` — trùng `.env`, ghi ra cho rõ.
 
 Muốn ép backend khác thì thêm `ASTRACODE_JUDGE=none` (hoặc `cli`) vào đầu lệnh; đổi trần song
