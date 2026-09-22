@@ -505,6 +505,17 @@ tầng grep của bên gọi giữ nguyên — cùng nội dung tệp thì nó c
 gọi **đổi cách chọn cửa sổ dòng**, hãy bump `rules_version`: đó là cần gạt để nói "từ
 đây là một câu hỏi khác", và nó nằm trong khoá.
 
+> **NỢ KỸ THUẬT — làm sau 25/09.** Khoá v2 phải chứa `grep_verdict` (hoặc, đúng hơn:
+> một vân tay của **mọi** trường ticket đi vào prompt). Hiện `grep_verdict` và
+> `grep_reason` có trong vân tay prompt của khoá, nhưng `contentFp` thì không, và
+> `ticketBlock` ở `verdictPrompt.mjs:62` vẫn in "Kết luận sơ bộ (tầng khớp từ khoá)"
+> vào prompt. Hệ quả đã xảy ra thật ngày 22/09: bên gọi gửi nhầm
+> `grep_verdict: "NO_EVIDENCE"` cho cả 164 ticket, model trả 57 `NO_EVIDENCE`, và những
+> dòng ấy được ghi dưới **đúng cái khoá** mà một lần chạy sạch trên cùng ticket + cùng
+> blob code sẽ sinh ra — nên mọi lần "Chấm lại" sau đó sẽ trúng dữ liệu nhiễm. Phải dọn
+> tay (xem `judge-cache/*.bak-*`). Luật chung: **trường nào vào prompt thì phải vào
+> khoá**; chỗ nào phá luật ấy là chỗ cache trả lời cho một câu hỏi khác câu đã hỏi.
+
 Ðổi bất kỳ thành phần nào là một khoá khác, nên **cache không bao giờ trả lời thay cho
 code đã đổi**. Ðiều KHÔNG còn đúng nữa là chiều ngược lại: một commit mới không còn tự
 động là miss. Commit chỉ chạm ba tệp thì chỉ những ticket dẫn ra ba tệp ấy phải hỏi lại
